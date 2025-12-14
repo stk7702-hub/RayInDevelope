@@ -102,10 +102,26 @@ local isResetting = false
 
 local FlyToggle, FlySpeedSlider, CFrameSpeedToggle, CFrameSpeedSlider
 
-local FLY_BASE_SPEED = 5
-local FLY_MAX_MULTIPLIER = 5
-local CFRAME_MIN_SPEED = 1
-local CFRAME_MAX_SPEED = 5
+-- Уменьшенные скорости
+local FLY_BASE_SPEED = 1
+local FLY_MAX_MULTIPLIER = 2
+local CFRAME_MIN_SPEED = 0.3
+local CFRAME_MAX_SPEED = 1.5
+
+-- Fun section variables
+local spin360Enabled = false
+local spin360Connection = nil
+local spin360Speed = 25
+
+local fellEnabled = false
+local fellThread = nil
+
+-- Character section variables
+local noclipEnabled = false
+local noclipConnection = nil
+
+local antiflingEnabled = false
+local antiflingConnection = nil
 
 local function calculateFlySpeed(sliderValue)
 	return FLY_BASE_SPEED * (1 + (sliderValue / 100) * (FLY_MAX_MULTIPLIER - 1))
@@ -193,11 +209,152 @@ local function cleanupJumpPower()
 	end
 end
 
+-- Fun section functions
+local function start360Spin()
+	if spin360Connection then return end
+	
+	spin360Connection = RunService.RenderStepped:Connect(function(dt)
+		if not spin360Enabled then return end
+		
+		local character = LocalPlayer.Character
+		if not character then return end
+		
+		local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+		if not humanoidRootPart then return end
+		
+		humanoidRootPart.CFrame = humanoidRootPart.CFrame * CFrame.Angles(0, spin360Speed * dt, 0)
+	end)
+end
+
+local function stop360Spin()
+	if spin360Connection then
+		spin360Connection:Disconnect()
+		spin360Connection = nil
+	end
+end
+
+-- Fell loop function
+local function startFellLoop()
+	fellThread = task.spawn(function()
+		while fellEnabled do
+			local character = LocalPlayer.Character
+			if not character then 
+				task.wait(0.5)
+				continue 
+			end
+			
+			local humanoid = character:FindFirstChildOfClass("Humanoid")
+			if not humanoid or humanoid.Health <= 0 then 
+				task.wait(0.5)
+				continue 
+			end
+			
+			-- Падаем
+			humanoid:ChangeState(Enum.HumanoidStateType.FallingDown)
+			task.wait(1.5)
+			
+			if not fellEnabled then break end
+			
+			-- Встаём
+			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+			task.wait(1)
+			
+			if not fellEnabled then break end
+		end
+	end)
+end
+
+local function stopFellLoop()
+	fellEnabled = false
+	if fellThread then
+		task.cancel(fellThread)
+		fellThread = nil
+	end
+	
+	-- Восстанавливаем нормальное состояние
+	local character = LocalPlayer.Character
+	if character then
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid and humanoid.Health > 0 then
+			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end
+	end
+end
+
+-- Character section functions
+local function enableNoclip()
+	if noclipConnection then return end
+	
+	noclipConnection = RunService.Stepped:Connect(function()
+		local character = LocalPlayer.Character
+		if character and character.Parent then
+			for _, part in pairs(character:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.CanCollide = false
+				end
+			end
+		end
+	end)
+end
+
+local function disableNoclip()
+	if noclipConnection then
+		noclipConnection:Disconnect()
+		noclipConnection = nil
+	end
+	
+	local character = LocalPlayer.Character
+	if character and character.Parent then
+		for _, part in pairs(character:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.CanCollide = true
+			end
+		end
+	end
+end
+
+local function enableAntiFling()
+	if antiflingConnection then return end
+	
+	antiflingConnection = RunService.Heartbeat:Connect(function()
+		local character = LocalPlayer.Character
+		if not character then return end
+		
+		local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+		if not humanoidRootPart then return end
+		
+		local velocity = humanoidRootPart.AssemblyLinearVelocity
+		local maxVelocity = 50
+		
+		if velocity.Magnitude > maxVelocity then
+			humanoidRootPart.AssemblyLinearVelocity = velocity.Unit * maxVelocity
+		end
+		
+		local angularVelocity = humanoidRootPart.AssemblyAngularVelocity
+		local maxAngularVelocity = 10
+		
+		if angularVelocity.Magnitude > maxAngularVelocity then
+			humanoidRootPart.AssemblyAngularVelocity = angularVelocity.Unit * maxAngularVelocity
+		end
+	end)
+end
+
+local function disableAntiFling()
+	if antiflingConnection then
+		antiflingConnection:Disconnect()
+		antiflingConnection = nil
+	end
+end
+
 local function cleanupAll()
 	cleanupFly()
 	cleanupCFrameSpeed()
 	cleanupWalkSpeed()
 	cleanupJumpPower()
+	stop360Spin()
+	stopFellLoop()
+	disableNoclip()
+	disableAntiFling()
 end
 
 local function getCharacterParts()
@@ -501,6 +658,22 @@ local function onCharacterAdded(character)
 		startJumpPowerLoop()
 	end
 	
+	if spin360Enabled then
+		start360Spin()
+	end
+	
+	if fellEnabled then
+		startFellLoop()
+	end
+	
+	if noclipEnabled then
+		enableNoclip()
+	end
+	
+	if antiflingEnabled then
+		enableAntiFling()
+	end
+	
 	humanoid.Died:Connect(function()
 		cleanupAll()
 	end)
@@ -723,12 +896,88 @@ if JumpPowerToggle.Option then
 	})
 end
 
-	local UI = Settings:AddSection({
+-- Fun Section (left side)
+local Fun = Misc:AddSection({
+	Name = "Fun",
+	Side = "left",
+	ShowTitle = true,
+	Height = 0
+})
+
+Fun:AddToggle({
+	Name = "360",
+	Default = false,
+	Option = false,
+	Callback = function(enabled)
+		spin360Enabled = enabled
+		if enabled then
+			start360Spin()
+		else
+			stop360Spin()
+		end
+	end,
+	Flag = "360Spin"
+})
+
+Fun:AddToggle({
+	Name = "Fell",
+	Default = false,
+	Option = false,
+	Callback = function(enabled)
+		fellEnabled = enabled
+		if enabled then
+			startFellLoop()
+		else
+			stopFellLoop()
+		end
+	end,
+	Flag = "Fell"
+})
+
+-- Character Section (right side)
+local Character = Misc:AddSection({
+	Name = "Character",
+	Side = "right",
+	ShowTitle = true,
+	Height = 0
+})
+
+Character:AddToggle({
+	Name = "Noclip",
+	Default = false,
+	Option = false,
+	Callback = function(enabled)
+		noclipEnabled = enabled
+		if enabled then
+			enableNoclip()
+		else
+			disableNoclip()
+		end
+	end,
+	Flag = "NoclipEnabled"
+})
+
+Character:AddToggle({
+	Name = "Anti Fling",
+	Default = false,
+	Option = false,
+	Callback = function(enabled)
+		antiflingEnabled = enabled
+		if enabled then
+			enableAntiFling()
+		else
+			disableAntiFling()
+		end
+	end,
+	Flag = "AntiFlingEnabled"
+})
+
+local UI = Settings:AddSection({
 	Name = "UI",
 	Side = "left",
 	ShowTitle = true,
-		Height = 0
-	})
+	Height = 0
+})
 
 local ToggleKeybind = UI:AddKeybind({
 	Name = "Toggle Menu",
@@ -745,61 +994,61 @@ local ToggleKeybind = UI:AddKeybind({
 		end
 	end
 })
-	
-	local MainColor = UI:AddColorPicker({
+
+local MainColor = UI:AddColorPicker({
 	Name = "Background Color",
-		Default = customTheme.Background,
-		Callback = function(color, transparency)
+	Default = customTheme.Background,
+	Callback = function(color, transparency)
 		Window:SetTheme({ Background = color, Panel = color })
-		end,
-		Flag = "MainColor"
-	})
-	
-	local AccentColor = UI:AddColorPicker({
-		Name = "Accent Color",
-		Default = customTheme.Accent,
-		Callback = function(color, transparency)
-			Window:SetTheme({
-				Accent = color,
-				SliderAccent = color,
-				ToggleAccent = color,
-				TabSelected = color,
-				ProfileStroke = color
-			})
+	end,
+	Flag = "MainColor"
+})
+
+local AccentColor = UI:AddColorPicker({
+	Name = "Accent Color",
+	Default = customTheme.Accent,
+	Callback = function(color, transparency)
+		Window:SetTheme({
+			Accent = color,
+			SliderAccent = color,
+			ToggleAccent = color,
+			TabSelected = color,
+			ProfileStroke = color
+		})
 	end,
 	Flag = "AccentColor"
-	})
-	
-	local SliderColor = UI:AddColorPicker({
-		Name = "Slider Color",
-		Default = customTheme.SliderAccent,
+})
+
+local SliderColor = UI:AddColorPicker({
+	Name = "Slider Color",
+	Default = customTheme.SliderAccent,
 	Callback = function(color)
 		Window:SetTheme({ SliderAccent = color })
 	end,
 	Flag = "SliderColor"
-	})
-	
-	local ToggleColor = UI:AddColorPicker({
-		Name = "Toggle Color",
-		Default = customTheme.ToggleAccent,
+})
+
+local ToggleColor = UI:AddColorPicker({
+	Name = "Toggle Color",
+	Default = customTheme.ToggleAccent,
 	Callback = function(color)
 		Window:SetTheme({ ToggleAccent = color })
 	end,
 	Flag = "ToggleColorPicker"
-	})
-	
-	local TabSelectedColor = UI:AddColorPicker({
+})
+
+local TabSelectedColor = UI:AddColorPicker({
 	Name = "Tab Selected",
-		Default = customTheme.TabSelected,
+	Default = customTheme.TabSelected,
 	Callback = function(color)
 		Window:SetTheme({ TabSelected = color })
 	end,
 	Flag = "TabSelectedColor"
-	})
-	
-	local TabUnselectedColor = UI:AddColorPicker({
+})
+
+local TabUnselectedColor = UI:AddColorPicker({
 	Name = "Tab Unselected",
-		Default = customTheme.TabUnselected,
+	Default = customTheme.TabUnselected,
 	Callback = function(color)
 		Window:SetTheme({ TabUnselected = color })
 	end,

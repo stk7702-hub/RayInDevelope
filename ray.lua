@@ -1,4 +1,4 @@
-local Fatality = loadstring(game:HttpGet("https://raw.githubusercontent.com/stk7702-hub/Uilibrary/refs/heads/main/library.lua"))()
+local Fatality = loadstring(game:HttpGet("https://raw.githubusercontent.com/XQwart/UILibTest/refs/heads/main/test.lua"))()
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -12,10 +12,10 @@ local customTheme = {
     Panel = Color3.fromRGB(10, 10, 10),
     Field = Color3.fromRGB(20, 20, 20),
     Stroke = Color3.fromRGB(30, 30, 30),
-    Text = Color3.fromRGB(255, 255, 255),
+	Text = Color3.fromRGB(255, 255, 255),
     TextDim = Color3.fromRGB(255, 255, 255),
-    Warning = Color3.fromRGB(255, 160, 92),
-    Shadow = Color3.fromRGB(0, 0, 0),
+	Warning = Color3.fromRGB(255, 160, 92),
+	Shadow = Color3.fromRGB(0, 0, 0),
     SliderAccent = Color3.fromRGB(255, 255, 255),
     ToggleAccent = Color3.fromRGB(255, 255, 255),
     TabSelected = Color3.fromRGB(255, 255, 255),
@@ -73,33 +73,464 @@ local Settings = Window:AddMenu({
 	AutoFill = false
 })
 
+local movementKeys = {w = false, a = false, s = false, d = false}
+
 local flyEnabled = false
-local flySpeed = 50
+local flySpeed = 0
+local flyCore = nil
+local flyBodyPosition = nil
+local flyBodyGyro = nil
+local flyConnection = nil
+local flyActive = false
 
-local function startFly()
-	-- Заглушка
-end
-
-local function stopFly()
-	-- Заглушка
-end
+local cframeSpeedEnabled = false
+local cframeSpeedValue = 0
+local cframeSpeedCore = nil
+local cframeSpeedBodyPosition = nil
+local cframeSpeedBodyGyro = nil
+local cframeSpeedConnection = nil
+local cframeSpeedActive = false
 
 local walkSpeedEnabled = false
 local jumpPowerEnabled = false
 local customWalkSpeed = 16
 local customJumpPower = 50
 local walkSpeedConnection = nil
+local jumpPowerConnection = nil
 
-local function updateCharacterStats()
+local isResetting = false
+
+local FlyToggle, FlySpeedSlider, CFrameSpeedToggle, CFrameSpeedSlider
+
+local FLY_BASE_SPEED = 5
+local FLY_MAX_MULTIPLIER = 5
+local CFRAME_MIN_SPEED = 1
+local CFRAME_MAX_SPEED = 5
+
+local function calculateFlySpeed(sliderValue)
+	return FLY_BASE_SPEED * (1 + (sliderValue / 100) * (FLY_MAX_MULTIPLIER - 1))
+end
+
+local function calculateCFrameSpeed(sliderValue)
+	return CFRAME_MIN_SPEED + (sliderValue / 100) * (CFRAME_MAX_SPEED - CFRAME_MIN_SPEED)
+end
+
+local function cleanupFly()
+	flyActive = false
+	
+	if flyConnection then
+		flyConnection:Disconnect()
+		flyConnection = nil
+	end
+	
+	if flyBodyPosition then
+		flyBodyPosition:Destroy()
+		flyBodyPosition = nil
+	end
+	
+	if flyBodyGyro then
+		flyBodyGyro:Destroy()
+		flyBodyGyro = nil
+	end
+	
+	if flyCore then
+		flyCore:Destroy()
+		flyCore = nil
+	end
+	
+	if workspace:FindFirstChild("FlyCore") then
+		workspace.FlyCore:Destroy()
+	end
+	
 	local character = LocalPlayer.Character
-	if not character then return end
+	if character then
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.PlatformStand = false
+		end
+	end
+end
+
+local function cleanupCFrameSpeed()
+	cframeSpeedActive = false
+	
+	if cframeSpeedConnection then
+		cframeSpeedConnection:Disconnect()
+		cframeSpeedConnection = nil
+	end
+	
+	if cframeSpeedBodyPosition then
+		cframeSpeedBodyPosition:Destroy()
+		cframeSpeedBodyPosition = nil
+	end
+	
+	if cframeSpeedBodyGyro then
+		cframeSpeedBodyGyro:Destroy()
+		cframeSpeedBodyGyro = nil
+	end
+	
+	if cframeSpeedCore then
+		cframeSpeedCore:Destroy()
+		cframeSpeedCore = nil
+	end
+	
+	if workspace:FindFirstChild("CFrameSpeedCore") then
+		workspace.CFrameSpeedCore:Destroy()
+	end
+end
+
+local function cleanupWalkSpeed()
+	if walkSpeedConnection then
+		walkSpeedConnection:Disconnect()
+		walkSpeedConnection = nil
+	end
+end
+
+local function cleanupJumpPower()
+	if jumpPowerConnection then
+		jumpPowerConnection:Disconnect()
+		jumpPowerConnection = nil
+	end
+end
+
+local function cleanupAll()
+	cleanupFly()
+	cleanupCFrameSpeed()
+	cleanupWalkSpeed()
+	cleanupJumpPower()
+end
+
+local function getCharacterParts()
+	local character = LocalPlayer.Character
+	if not character then return nil, nil, nil end
 	
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then return nil, nil, nil end
+	
+	local rootPart = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("LowerTorso")
+	if not rootPart then return nil, nil, nil end
+	
+	return character, humanoid, rootPart
+end
+
+local function createCore(name)
+	local character, humanoid, rootPart = getCharacterParts()
+	if not character then return nil end
+	
+	if workspace:FindFirstChild(name) then
+		workspace[name]:Destroy()
+	end
+	
+	local core = Instance.new("Part")
+	core.Name = name
+	core.Size = Vector3.new(0.05, 0.05, 0.05)
+	core.Transparency = 1
+	core.CanCollide = false
+	core.Anchored = false
+	core.Parent = workspace
+	
+	local weld = Instance.new("Weld")
+	weld.Part0 = core
+	weld.Part1 = rootPart
+	weld.C0 = CFrame.new(0, 0, 0)
+	weld.Parent = core
+	
+	return core
+end
+
+local function startFly()
+	if flyActive then return end
+	
+	if cframeSpeedActive or cframeSpeedEnabled then
+		cleanupCFrameSpeed()
+		cframeSpeedEnabled = false
+		if CFrameSpeedToggle then
+			CFrameSpeedToggle:SetValue(false)
+		end
+		if CFrameSpeedSlider then
+			CFrameSpeedSlider:SetVisible(false)
+		end
+	end
+	
+	local character, humanoid, rootPart = getCharacterParts()
+	if not character then return end
+	
+	flyCore = createCore("FlyCore")
+	if not flyCore then return end
+	
+	task.wait()
+	
+	flyBodyPosition = Instance.new("BodyPosition")
+	flyBodyPosition.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+	flyBodyPosition.Position = flyCore.Position
+	flyBodyPosition.D = 100
+	flyBodyPosition.P = 10000
+	flyBodyPosition.Parent = flyCore
+	
+	flyBodyGyro = Instance.new("BodyGyro")
+	flyBodyGyro.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+	flyBodyGyro.CFrame = flyCore.CFrame
+	flyBodyGyro.D = 100
+	flyBodyGyro.Parent = flyCore
+	
+	flyActive = true
+	
+	flyConnection = RunService.RenderStepped:Connect(function()
+		if not flyEnabled or not flyActive then return end
+		
+		local char, hum, root = getCharacterParts()
+		if not char or not flyCore or not flyCore.Parent then
+			cleanupFly()
+			return
+		end
+		
+		hum.PlatformStand = true
+		
+		local camera = workspace.CurrentCamera
+		local moveDirection = Vector3.new(0, 0, 0)
+		
+		if movementKeys.w then
+			moveDirection = moveDirection + camera.CFrame.LookVector
+		end
+		if movementKeys.s then
+			moveDirection = moveDirection - camera.CFrame.LookVector
+		end
+		if movementKeys.d then
+			moveDirection = moveDirection + camera.CFrame.RightVector
+		end
+		if movementKeys.a then
+			moveDirection = moveDirection - camera.CFrame.RightVector
+		end
+		
+		if moveDirection.Magnitude > 0 then
+			moveDirection = moveDirection.Unit
+		end
+		
+		local actualSpeed = calculateFlySpeed(flySpeed)
+		
+		if flyBodyPosition then
+			flyBodyPosition.Position = flyBodyPosition.Position + moveDirection * actualSpeed
+		end
+		if flyBodyGyro then
+			flyBodyGyro.CFrame = camera.CFrame
+		end
+	end)
+end
+
+local function stopFly()
+	cleanupFly()
+end
+
+local function startCFrameSpeed()
+	if cframeSpeedActive then return end
+	
+	if flyEnabled or flyActive then
+		cframeSpeedEnabled = false
+		if CFrameSpeedToggle then
+			CFrameSpeedToggle:SetValue(false)
+		end
+		if CFrameSpeedSlider then
+			CFrameSpeedSlider:SetVisible(false)
+		end
+		return
+	end
+	
+	local character, humanoid, rootPart = getCharacterParts()
+	if not character then return end
+	
+	cframeSpeedCore = createCore("CFrameSpeedCore")
+	if not cframeSpeedCore then return end
+	
+	task.wait()
+	
+	cframeSpeedBodyPosition = Instance.new("BodyPosition")
+	cframeSpeedBodyPosition.MaxForce = Vector3.new(math.huge, 0, math.huge)
+	cframeSpeedBodyPosition.Position = cframeSpeedCore.Position
+	cframeSpeedBodyPosition.D = 100
+	cframeSpeedBodyPosition.P = 10000
+	cframeSpeedBodyPosition.Parent = cframeSpeedCore
+	
+	cframeSpeedBodyGyro = Instance.new("BodyGyro")
+	cframeSpeedBodyGyro.MaxTorque = Vector3.new(0, 9e9, 0)
+	cframeSpeedBodyGyro.CFrame = cframeSpeedCore.CFrame
+	cframeSpeedBodyGyro.D = 100
+	cframeSpeedBodyGyro.Parent = cframeSpeedCore
+	
+	cframeSpeedActive = true
+	
+	cframeSpeedConnection = RunService.RenderStepped:Connect(function()
+		if not cframeSpeedEnabled or not cframeSpeedActive then return end
+		
+		if flyEnabled or flyActive then
+			cleanupCFrameSpeed()
+			cframeSpeedEnabled = false
+			if CFrameSpeedToggle then
+				CFrameSpeedToggle:SetValue(false)
+			end
+			if CFrameSpeedSlider then
+				CFrameSpeedSlider:SetVisible(false)
+			end
+			return
+		end
+		
+		local char, hum, root = getCharacterParts()
+		if not char or not cframeSpeedCore or not cframeSpeedCore.Parent then
+			cleanupCFrameSpeed()
+			return
+		end
+		
+		local camera = workspace.CurrentCamera
+		local moveDirection = Vector3.new(0, 0, 0)
+		
+		local lookVector = camera.CFrame.LookVector
+		local rightVector = camera.CFrame.RightVector
+		
+		lookVector = Vector3.new(lookVector.X, 0, lookVector.Z)
+		if lookVector.Magnitude > 0 then
+			lookVector = lookVector.Unit
+		end
+		
+		rightVector = Vector3.new(rightVector.X, 0, rightVector.Z)
+		if rightVector.Magnitude > 0 then
+			rightVector = rightVector.Unit
+		end
+		
+		if movementKeys.w then
+			moveDirection = moveDirection + lookVector
+		end
+		if movementKeys.s then
+			moveDirection = moveDirection - lookVector
+		end
+		if movementKeys.d then
+			moveDirection = moveDirection + rightVector
+		end
+		if movementKeys.a then
+			moveDirection = moveDirection - rightVector
+		end
+		
+		if moveDirection.Magnitude > 0 then
+			moveDirection = moveDirection.Unit
+		end
+		
+		local actualSpeed = calculateCFrameSpeed(cframeSpeedValue)
+		
+		if cframeSpeedBodyPosition then
+			local newPos = cframeSpeedBodyPosition.Position + moveDirection * actualSpeed
+			cframeSpeedBodyPosition.Position = Vector3.new(newPos.X, cframeSpeedCore.Position.Y, newPos.Z)
+		end
+		
+		if cframeSpeedBodyGyro and moveDirection.Magnitude > 0 then
+			cframeSpeedBodyGyro.CFrame = CFrame.lookAt(Vector3.new(0, 0, 0), moveDirection)
+		end
+	end)
+end
+
+local function stopCFrameSpeed()
+	cleanupCFrameSpeed()
+end
+
+local function startWalkSpeedLoop()
+	cleanupWalkSpeed()
+	
+	walkSpeedConnection = RunService.RenderStepped:Connect(function()
+		if not walkSpeedEnabled then return end
+		
+		local character, humanoid = getCharacterParts()
+		if not humanoid then return end
+		
+		if humanoid.WalkSpeed ~= customWalkSpeed then
+			humanoid.WalkSpeed = customWalkSpeed
+		end
+	end)
+end
+
+local function startJumpPowerLoop()
+	cleanupJumpPower()
+	
+	jumpPowerConnection = RunService.RenderStepped:Connect(function()
+		if not jumpPowerEnabled then return end
+		
+		local character, humanoid = getCharacterParts()
+		if not humanoid then return end
+		
+		if humanoid.JumpPower ~= customJumpPower then
+			humanoid.JumpPower = customJumpPower
+		end
+	end)
+end
+
+local function resetCharacterStats()
+	local character, humanoid = getCharacterParts()
 	if not humanoid then return end
 	
-	humanoid.WalkSpeed = walkSpeedEnabled and customWalkSpeed or 16
-	humanoid.JumpPower = jumpPowerEnabled and customJumpPower or 50
+	if not walkSpeedEnabled then
+		humanoid.WalkSpeed = 16
+	end
+	if not jumpPowerEnabled then
+		humanoid.JumpPower = 50
+	end
 end
+
+local function onCharacterAdded(character)
+	isResetting = true
+	
+	cleanupAll()
+	
+	local humanoid = character:WaitForChild("Humanoid", 10)
+	if not humanoid then
+		isResetting = false
+		return
+	end
+	
+	character:WaitForChild("HumanoidRootPart", 10)
+	task.wait(0.5)
+	
+	isResetting = false
+	
+	if flyEnabled then
+		startFly()
+	elseif cframeSpeedEnabled then
+		startCFrameSpeed()
+	end
+	
+	if walkSpeedEnabled then
+		startWalkSpeedLoop()
+	end
+	
+	if jumpPowerEnabled then
+		startJumpPowerLoop()
+	end
+	
+	humanoid.Died:Connect(function()
+		cleanupAll()
+	end)
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	
+	if input.KeyCode == Enum.KeyCode.W then
+		movementKeys.w = true
+	elseif input.KeyCode == Enum.KeyCode.A then
+		movementKeys.a = true
+	elseif input.KeyCode == Enum.KeyCode.S then
+		movementKeys.s = true
+	elseif input.KeyCode == Enum.KeyCode.D then
+		movementKeys.d = true
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.W then
+		movementKeys.w = false
+	elseif input.KeyCode == Enum.KeyCode.A then
+		movementKeys.a = false
+	elseif input.KeyCode == Enum.KeyCode.S then
+		movementKeys.s = false
+	elseif input.KeyCode == Enum.KeyCode.D then
+		movementKeys.d = false
+	end
+end)
 
 local Movement = Misc:AddSection({
 	Name = "Movement",
@@ -108,10 +539,10 @@ local Movement = Misc:AddSection({
 	Height = 0
 })
 
-local FlySpeedSlider = Movement:AddSlider({
+FlySpeedSlider = Movement:AddSlider({
 	Name = "Fly Speed",
 	Type = "",
-	Default = 50,
+	Default = 0,
 	Min = 0,
 	Max = 100,
 	Round = 0,
@@ -123,11 +554,12 @@ local FlySpeedSlider = Movement:AddSlider({
 
 FlySpeedSlider:SetVisible(false)
 
-local FlyToggle = Movement:AddToggle({
+FlyToggle = Movement:AddToggle({
 	Name = "Fly",
 	Default = false,
 	Option = true,
 	Callback = function(enabled)
+		if isResetting then return end
 		flyEnabled = enabled
 		if enabled then
 			startFly()
@@ -148,6 +580,56 @@ if FlyToggle.Option then
 	})
 end
 
+CFrameSpeedSlider = Movement:AddSlider({
+	Name = "CFrame Speed",
+	Type = "",
+	Default = 0,
+	Min = 0,
+	Max = 100,
+	Round = 0,
+	Callback = function(value)
+		cframeSpeedValue = value
+	end,
+	Flag = "CFrameSpeedValue"
+})
+
+CFrameSpeedSlider:SetVisible(false)
+
+CFrameSpeedToggle = Movement:AddToggle({
+	Name = "CFrame Speed",
+	Default = false,
+	Option = true,
+	Callback = function(enabled)
+		if isResetting then return end
+		cframeSpeedEnabled = enabled
+		if enabled then
+			if flyEnabled or flyActive then
+				cframeSpeedEnabled = false
+				if CFrameSpeedToggle then
+					task.defer(function()
+						CFrameSpeedToggle:SetValue(false)
+					end)
+				end
+				return
+			end
+			startCFrameSpeed()
+		else
+			stopCFrameSpeed()
+		end
+		CFrameSpeedSlider:SetVisible(cframeSpeedEnabled)
+	end,
+	Flag = "CFrameSpeedEnabled"
+})
+
+if CFrameSpeedToggle.Option then
+	CFrameSpeedToggle.Option:AddKeybind({
+		Name = "Keybind",
+		Default = nil,
+		Callback = function(key) end,
+		Flag = "CFrameSpeedKeybind"
+	})
+end
+
 local Human = Misc:AddSection({
 	Name = "Human",
 	Side = "left",
@@ -164,7 +646,6 @@ local WalkSpeedSlider = Human:AddSlider({
 	Round = 0,
 	Callback = function(value)
 		customWalkSpeed = value
-		if walkSpeedEnabled then updateCharacterStats() end
 	end,
 	Flag = "WalkSpeedValue"
 })
@@ -176,31 +657,15 @@ local WalkSpeedToggle = Human:AddToggle({
 	Default = false,
 	Option = true,
 	Callback = function(enabled)
+		if isResetting then return end
 		walkSpeedEnabled = enabled
-		updateCharacterStats()
 		WalkSpeedSlider:SetVisible(enabled)
 		
 		if enabled then
-			if walkSpeedConnection then
-				walkSpeedConnection:Disconnect()
-			end
-			
-			walkSpeedConnection = RunService.RenderStepped:Connect(function()
-				local character = LocalPlayer.Character
-				if not character then return end
-				
-				local humanoid = character:FindFirstChildOfClass("Humanoid")
-				if not humanoid then return end
-				
-				if walkSpeedEnabled and humanoid.WalkSpeed ~= customWalkSpeed then
-					humanoid.WalkSpeed = customWalkSpeed
-				end
-			end)
+			startWalkSpeedLoop()
 		else
-			if walkSpeedConnection then
-				walkSpeedConnection:Disconnect()
-				walkSpeedConnection = nil
-			end
+			cleanupWalkSpeed()
+			resetCharacterStats()
 		end
 	end,
 	Flag = "WalkSpeedEnabled"
@@ -224,7 +689,6 @@ local JumpPowerSlider = Human:AddSlider({
 	Round = 0,
 	Callback = function(value)
 		customJumpPower = value
-		if jumpPowerEnabled then updateCharacterStats() end
 	end,
 	Flag = "JumpPowerValue"
 })
@@ -236,9 +700,16 @@ local JumpPowerToggle = Human:AddToggle({
 	Default = false,
 	Option = true,
 	Callback = function(enabled)
+		if isResetting then return end
 		jumpPowerEnabled = enabled
-		updateCharacterStats()
 		JumpPowerSlider:SetVisible(enabled)
+		
+		if enabled then
+			startJumpPowerLoop()
+		else
+			cleanupJumpPower()
+			resetCharacterStats()
+		end
 	end,
 	Flag = "JumpPowerEnabled"
 })
@@ -252,12 +723,12 @@ if JumpPowerToggle.Option then
 	})
 end
 
-local UI = Settings:AddSection({
+	local UI = Settings:AddSection({
 	Name = "UI",
 	Side = "left",
 	ShowTitle = true,
-	Height = 0
-})
+		Height = 0
+	})
 
 local ToggleKeybind = UI:AddKeybind({
 	Name = "Toggle Menu",
@@ -274,61 +745,61 @@ local ToggleKeybind = UI:AddKeybind({
 		end
 	end
 })
-
-local MainColor = UI:AddColorPicker({
+	
+	local MainColor = UI:AddColorPicker({
 	Name = "Background Color",
-	Default = customTheme.Background,
-	Callback = function(color, transparency)
+		Default = customTheme.Background,
+		Callback = function(color, transparency)
 		Window:SetTheme({ Background = color, Panel = color })
-	end,
-	Flag = "MainColor"
-})
-
-local AccentColor = UI:AddColorPicker({
-	Name = "Accent Color",
-	Default = customTheme.Accent,
-	Callback = function(color, transparency)
-		Window:SetTheme({
-			Accent = color,
-			SliderAccent = color,
-			ToggleAccent = color,
-			TabSelected = color,
-			ProfileStroke = color
-		})
+		end,
+		Flag = "MainColor"
+	})
+	
+	local AccentColor = UI:AddColorPicker({
+		Name = "Accent Color",
+		Default = customTheme.Accent,
+		Callback = function(color, transparency)
+			Window:SetTheme({
+				Accent = color,
+				SliderAccent = color,
+				ToggleAccent = color,
+				TabSelected = color,
+				ProfileStroke = color
+			})
 	end,
 	Flag = "AccentColor"
-})
-
-local SliderColor = UI:AddColorPicker({
-	Name = "Slider Color",
-	Default = customTheme.SliderAccent,
+	})
+	
+	local SliderColor = UI:AddColorPicker({
+		Name = "Slider Color",
+		Default = customTheme.SliderAccent,
 	Callback = function(color)
 		Window:SetTheme({ SliderAccent = color })
 	end,
 	Flag = "SliderColor"
-})
-
-local ToggleColor = UI:AddColorPicker({
-	Name = "Toggle Color",
-	Default = customTheme.ToggleAccent,
+	})
+	
+	local ToggleColor = UI:AddColorPicker({
+		Name = "Toggle Color",
+		Default = customTheme.ToggleAccent,
 	Callback = function(color)
 		Window:SetTheme({ ToggleAccent = color })
 	end,
 	Flag = "ToggleColorPicker"
-})
-
-local TabSelectedColor = UI:AddColorPicker({
+	})
+	
+	local TabSelectedColor = UI:AddColorPicker({
 	Name = "Tab Selected",
-	Default = customTheme.TabSelected,
+		Default = customTheme.TabSelected,
 	Callback = function(color)
 		Window:SetTheme({ TabSelected = color })
 	end,
 	Flag = "TabSelectedColor"
-})
-
-local TabUnselectedColor = UI:AddColorPicker({
+	})
+	
+	local TabUnselectedColor = UI:AddColorPicker({
 	Name = "Tab Unselected",
-	Default = customTheme.TabUnselected,
+		Default = customTheme.TabUnselected,
 	Callback = function(color)
 		Window:SetTheme({ TabUnselected = color })
 	end,
@@ -434,20 +905,12 @@ local UsernameTextColor = UI:AddColorPicker({
 	Flag = "UsernameTextColor"
 })
 
-LocalPlayer.CharacterAdded:Connect(function(character)
-	if flyEnabled then
-		stopFly()
-		task.wait(0.5)
-		startFly()
-	end
-	
-	task.wait(0.1)
-	updateCharacterStats()
-end)
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
 
-task.spawn(function()
-	task.wait(0.5)
-	updateCharacterStats()
-end)
+if LocalPlayer.Character then
+	task.spawn(function()
+		onCharacterAdded(LocalPlayer.Character)
+	end)
+end
 
 print("RAY UI Loaded! Press Insert to toggle menu")

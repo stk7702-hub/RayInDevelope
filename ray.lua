@@ -5,6 +5,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local Stats = game:GetService("Stats")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 local MainEvent = ReplicatedStorage:WaitForChild("MainEvent")
@@ -70,14 +71,45 @@ local Silent = {
 	Enabled = false,
 	Active = false,
 	FOV = 100,
-	Prediction = 0.1,
 	CurrentTarget = nil,
-	LastShot = 0,
 	BlockedConnections = {},
 	InputConnection = nil,
+	InputEndConnection = nil,
 	RenderConnection = nil,
 	CharacterConnection = nil,
+	-- Advanced prediction settings
+	Resolver = false,
+	JumpOffset = 0,
+	AutoPrediction = false,
+	AutoPredictionDivisor = 250,
 }
+
+-- Prediction constants
+local PREDICTION_BASE = 0.095
+local PREDICTION_PING_SCALE = 0.0005
+local VELOCITY_SMOOTH_ALPHA = 0.4
+local VELOCITY_MAX_MAGNITUDE = 150
+local JUMP_STATE_OFFSET_MULTIPLIER = 1.0
+local BULLET_TRAVEL_TIME_ESTIMATE = 0.015
+
+-- Ping-based prediction table (fallback)
+local PredictionTable = {
+	{ping = 200, value = 0.185},
+	{ping = 150, value = 0.165},
+	{ping = 120, value = 0.150},
+	{ping = 100, value = 0.140},
+	{ping = 80, value = 0.130},
+	{ping = 60, value = 0.120},
+	{ping = 40, value = 0.110},
+	{ping = 20, value = 0.100},
+	{ping = 0, value = 0.095},
+}
+
+-- Velocity tracking for smooth prediction
+local previousPositions = {}
+local smoothedVelocities = {}
+local lastUpdateTimes = {}
+local accelerationCache = {}
 
 local ESP = {
 	ShowCameraLockFOV = true,
@@ -95,20 +127,55 @@ local menuOpen = true
 local menuToggleKey = Enum.KeyCode.Insert
 
 local flyEnabled = false
-local flySpeed = 0
-local flyCore = nil
-local flyBodyPosition = nil
-local flyBodyGyro = nil
+local flySpeed = 50
 local flyConnection = nil
 local flyActive = false
 
 local cframeSpeedEnabled = false
-local cframeSpeedValue = 0
-local cframeSpeedCore = nil
-local cframeSpeedBodyPosition = nil
-local cframeSpeedBodyGyro = nil
+local cframeSpeedValue = 1
 local cframeSpeedConnection = nil
 local cframeSpeedActive = false
+
+-- HitSound settings
+local HitSound = {
+	Enabled = false,
+	Volume = 1,
+	SelectedSound = "Bubble",
+	Sounds = {
+		["Bubble"] = "rbxassetid://6534947588",
+		["Lazer"] = "rbxassetid://130791043",
+		["Pick"] = "rbxassetid://1347140027",
+		["Pop"] = "rbxassetid://198598793",
+		["Rust"] = "rbxassetid://1255040462",
+		["Sans"] = "rbxassetid://152745539",
+		["Fart"] = "rbxassetid://449860068",
+		["Big"] = "rbxassetid://554081908",
+		["Vine"] = "rbxassetid://352543648",
+		["UwU"] = "rbxassetid://4841131517",
+		["Bruh"] = "rbxassetid://5734063719",
+		["Skeet"] = "rbxassetid://1265316264",
+		["Neverlose"] = "rbxassetid://4817809188",
+		["Fatality"] = "rbxassetid://5424968049",
+		["Bonk"] = "rbxassetid://4606604453",
+		["Minecraft"] = "rbxassetid://4018616850",
+		["Gamesense"] = "rbxassetid://4018616850",
+		["RIFK7"] = "rbxassetid://318620857",
+		["Bamboo"] = "rbxassetid://5022625084",
+		["Crowbar"] = "rbxassetid://1321060532",
+		["Weeb"] = "rbxassetid://718613635",
+		["Beep"] = "rbxassetid://8327813988",
+		["Osu"] = "rbxassetid://7147454322",
+		["Mario"] = "rbxassetid://187011839",
+	},
+	Connection = nil,
+	LastSoundTime = 0,
+	SoundCooldown = 0.1,
+}
+local lastTargetHealth = {}
+
+-- Silent aim mouse hold tracking
+local isMouseHeld = false
+local silentHoldConnection = nil
 
 local walkSpeedEnabled = false
 local jumpPowerEnabled = false
@@ -132,17 +199,88 @@ local antiflingConnection = nil
 
 local UIElements = {}
 
-local FLY_BASE_SPEED = 1
-local FLY_MAX_MULTIPLIER = 2
-local CFRAME_MIN_SPEED = 0.3
-local CFRAME_MAX_SPEED = 1.5
+-- Movement speed constants
+local FLY_MIN_SPEED = 0.5
+local FLY_MAX_SPEED = 5
+local CFRAME_MIN_SPEED = 0.1
+local CFRAME_MAX_SPEED = 2
 
 local function calculateFlySpeed(sliderValue)
-	return FLY_BASE_SPEED * (1 + (sliderValue / 100) * (FLY_MAX_MULTIPLIER - 1))
+	return FLY_MIN_SPEED + (sliderValue / 100) * (FLY_MAX_SPEED - FLY_MIN_SPEED)
 end
 
 local function calculateCFrameSpeed(sliderValue)
 	return CFRAME_MIN_SPEED + (sliderValue / 100) * (CFRAME_MAX_SPEED - CFRAME_MIN_SPEED)
+end
+
+-- HitSound function
+local function playHitSound()
+	if not HitSound.Enabled then return end
+	
+	-- Cooldown check to prevent sound spam
+	local currentTime = tick()
+	if currentTime - HitSound.LastSoundTime < HitSound.SoundCooldown then return end
+	HitSound.LastSoundTime = currentTime
+	
+	local soundId = HitSound.Sounds[HitSound.SelectedSound]
+	if not soundId then return end
+	
+	local sound = Instance.new("Sound")
+	sound.SoundId = soundId
+	sound.Volume = HitSound.Volume
+	sound.Parent = workspace
+	sound:Play()
+	sound.Ended:Connect(function()
+		sound:Destroy()
+	end)
+end
+
+-- Get current active target (from CameraLock or Silent)
+local function getCurrentTarget()
+	if CameraLock.Active and CameraLock.CurrentTarget then
+		return CameraLock.CurrentTarget
+	end
+	if Silent.Active and Silent.CurrentTarget then
+		return Silent.CurrentTarget
+	end
+	return nil
+end
+
+-- Start HitSound monitoring
+local function startHitSoundMonitor()
+	if HitSound.Connection then return end
+	
+	HitSound.Connection = RunService.Heartbeat:Connect(function()
+		if not HitSound.Enabled then return end
+		
+		local target = getCurrentTarget()
+		if not target or not target.Character then return end
+		
+		local humanoid = target.Character:FindFirstChildOfClass("Humanoid")
+		if not humanoid then return end
+		
+		local playerName = target.Name
+		local currentHealth = humanoid.Health
+		
+		if not lastTargetHealth[playerName] then
+			lastTargetHealth[playerName] = currentHealth
+			return
+		end
+		
+		if currentHealth < lastTargetHealth[playerName] then
+			playHitSound()
+		end
+		
+		lastTargetHealth[playerName] = currentHealth
+	end)
+end
+
+-- Stop HitSound monitoring
+local function stopHitSoundMonitor()
+	if HitSound.Connection then
+		HitSound.Connection:Disconnect()
+		HitSound.Connection = nil
+	end
 end
 
 local function GetCharacterParts(player)
@@ -222,6 +360,133 @@ local function GetHitboxPart(character, hitboxName)
 	return character:FindFirstChild("HumanoidRootPart")
 end
 
+-- Get current ping
+local function GetPing()
+	local ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+	return ping
+end
+
+-- Get prediction multiplier based on ping (with auto prediction support)
+local function GetPredictionMultiplier(useAutoPred, autoPredDivisor)
+	local ping = GetPing()
+	
+	if useAutoPred then
+		local divisor = autoPredDivisor or Silent.AutoPredictionDivisor
+		return PREDICTION_BASE + (ping / divisor) * 0.1
+	end
+	
+	for _, data in ipairs(PredictionTable) do
+		if ping >= data.ping then
+			return data.value
+		end
+	end
+	return PREDICTION_BASE
+end
+
+-- Get smoothed velocity for a player with improved interpolation
+local function GetSmoothedVelocity(character, useResolver)
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return Vector3.zero end
+	
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local player = Players:GetPlayerFromCharacter(character)
+	
+	-- Resolver mode: use MoveDirection * WalkSpeed (more stable)
+	if useResolver and humanoid then
+		local moveDir = humanoid.MoveDirection
+		local walkSpeed = humanoid.WalkSpeed
+		if moveDir.Magnitude > 0 then
+			return moveDir * walkSpeed
+		end
+		return Vector3.zero
+	end
+	
+	-- Standard mode: use smoothed physics velocity
+	if not player then 
+		local velocity = rootPart.AssemblyLinearVelocity
+		if velocity.Magnitude > VELOCITY_MAX_MAGNITUDE then
+			return velocity.Unit * VELOCITY_MAX_MAGNITUDE
+		end
+		return velocity
+	end
+	
+	local currentTime = tick()
+	local currentPos = rootPart.Position
+	local lastPos = previousPositions[player] or currentPos
+	local lastTime = lastUpdateTimes[player] or (currentTime - 0.016)
+	
+	local deltaTime = math.max(currentTime - lastTime, 0.001)
+	local rawVelocity = (currentPos - lastPos) / deltaTime
+	
+	-- Clamp raw velocity to prevent extreme values
+	if rawVelocity.Magnitude > VELOCITY_MAX_MAGNITUDE then
+		rawVelocity = rawVelocity.Unit * VELOCITY_MAX_MAGNITUDE
+	end
+	
+	-- Exponential smoothing with adaptive alpha
+	local prevSmoothed = smoothedVelocities[player] or rawVelocity
+	local alpha = math.clamp(VELOCITY_SMOOTH_ALPHA * (deltaTime / 0.016), 0.1, 0.8)
+	local smoothed = prevSmoothed:Lerp(rawVelocity, alpha)
+	
+	-- Track acceleration for better prediction
+	local prevVelocity = smoothedVelocities[player] or smoothed
+	accelerationCache[player] = (smoothed - prevVelocity) / deltaTime
+	
+	smoothedVelocities[player] = smoothed
+	previousPositions[player] = currentPos
+	lastUpdateTimes[player] = currentTime
+	
+	return smoothed
+end
+
+-- Calculate jump offset based on humanoid state
+local function GetJumpOffset(character, baseOffset)
+	if baseOffset == 0 then return 0 end
+	
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return 0 end
+	
+	local state = humanoid:GetState()
+	if state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping then
+		return baseOffset * JUMP_STATE_OFFSET_MULTIPLIER
+	end
+	
+	return 0
+end
+
+-- Advanced prediction for Silent Aim with all features
+local function PredictPositionSilent(character, hitbox)
+	if not hitbox then return nil end
+	
+	local useResolver = Silent.Resolver
+	local jumpOffset = Silent.JumpOffset
+	local useAutoPred = Silent.AutoPrediction
+	
+	local velocity = GetSmoothedVelocity(character, useResolver)
+	local prediction = GetPredictionMultiplier(useAutoPred, Silent.AutoPredictionDivisor)
+	
+	-- Calculate jump offset
+	local yOffset = GetJumpOffset(character, jumpOffset)
+	
+	-- Get distance to target for travel time compensation
+	local myChar = LocalPlayer.Character
+	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+	if myRoot then
+		local distance = (hitbox.Position - myRoot.Position).Magnitude
+		local travelTimeCompensation = distance * BULLET_TRAVEL_TIME_ESTIMATE * 0.001
+		prediction = prediction + travelTimeCompensation
+	end
+	
+	-- Apply acceleration compensation for changing velocity
+	local player = Players:GetPlayerFromCharacter(character)
+	local accel = player and accelerationCache[player] or Vector3.zero
+	local accelCompensation = accel * prediction * prediction * 0.5
+	
+	local predictedPos = hitbox.Position + (velocity * prediction) + accelCompensation + Vector3.new(0, yOffset, 0)
+	
+	return predictedPos
+end
+
 local function PredictPosition(character, hitbox, prediction)
 	if not hitbox then return nil end
 	if prediction <= 0 then return hitbox.Position end
@@ -277,6 +542,21 @@ local function GetEquippedGun()
 	return tool
 end
 
+local function CanShootSilent()
+	local char, hum = GetCharacterParts()
+	if not char or not hum then return false, nil end
+	local gun = GetEquippedGun()
+	if not gun then return false, nil end
+	local ammo = gun:FindFirstChild("Ammo")
+	if ammo and ammo.Value <= 0 then return false, nil end
+	local bodyEffects = char:FindFirstChild("BodyEffects")
+	if not bodyEffects then return false, nil end
+	if bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then return false, nil end
+	if bodyEffects:FindFirstChild("Dead") and bodyEffects.Dead.Value then return false, nil end
+	if bodyEffects:FindFirstChild("Reload") and bodyEffects.Reload.Value then return false, nil end
+	return true, gun
+end
+
 local function CanShoot()
 	local char, hum = GetCharacterParts()
 	if not char or not hum then return false, nil end
@@ -284,13 +564,6 @@ local function CanShoot()
 	if not gun then return false, nil end
 	local ammo = gun:FindFirstChild("Ammo")
 	if ammo and ammo.Value <= 0 then return false, nil end
-	local cooldown = gun:FindFirstChild("ShootingCooldown")
-	if cooldown then
-		local now = tick()
-		if now - Silent.LastShot < cooldown.Value then
-			return false, nil
-		end
-	end
 	local bodyEffects = char:FindFirstChild("BodyEffects")
 	if not bodyEffects then return false, nil end
 	if bodyEffects:FindFirstChild("Cuff") and bodyEffects.Cuff.Value then return false, nil end
@@ -306,29 +579,8 @@ local function CanShoot()
 	return true, gun
 end
 
-local function CreateBulletTracer(startPos, endPos, duration)
-	local ignored = workspace:FindFirstChild("Ignored")
-	if not ignored then return end
-	local distance = (endPos - startPos).Magnitude
-	local bullet = Instance.new("Part")
-	bullet.Name = "SilentTracer"
-	bullet.Anchored = true
-	bullet.CanCollide = false
-	bullet.Size = Vector3.new(0.1, 0.1, distance)
-	bullet.CFrame = CFrame.lookAt(startPos, endPos) * CFrame.new(0, 0, -distance / 2)
-	bullet.Material = Enum.Material.Neon
-	bullet.Color = Color3.fromRGB(255, 255, 0)
-	bullet.Transparency = 0.3
-	bullet.Parent = ignored
-	local tween = TweenService:Create(bullet, TweenInfo.new(duration or 0.3, Enum.EasingStyle.Linear), {Transparency = 1})
-	tween:Play()
-	tween.Completed:Connect(function()
-		bullet:Destroy()
-	end)
-end
-
 local function FireModifiedShot(target)
-	local canShootResult, gun = CanShoot()
+	local canShootResult, gun = CanShootSilent()
 	if not canShootResult or not gun then return false end
 	local char = LocalPlayer.Character
 	local myHRP = char:FindFirstChild("HumanoidRootPart")
@@ -337,7 +589,7 @@ local function FireModifiedShot(target)
 	if not targetChar then return false end
 	local hitbox = GetHitboxPart(targetChar, Aimbot.Hitbox)
 	if not hitbox then return false end
-	local targetPos = PredictPosition(targetChar, hitbox, Silent.Prediction)
+	local targetPos = PredictPositionSilent(targetChar, hitbox)
 	if not targetPos then return false end
 	local startPos = myHRP.Position + Vector3.new(0, 2, 0)
 	local gunRange = gun:FindFirstChild("Range")
@@ -353,8 +605,6 @@ local function FireModifiedShot(target)
 		gunRemote:FireServer("Shoot")
 	end
 	MainEvent:FireServer("ShootGun", gun.Handle, startPos, targetPos, hitbox, Vector3.new(0, 1, 0))
-	Silent.LastShot = tick()
-	CreateBulletTracer(startPos, targetPos, 0.2)
 	local shootSound = gun.Handle:FindFirstChild("Fire") or gun.Handle:FindFirstChild("ShootSound")
 	if shootSound and shootSound:IsA("Sound") then
 		shootSound:Play()
@@ -363,7 +613,7 @@ local function FireModifiedShot(target)
 end
 
 local function FireNormalShot()
-	local canShootResult, gun = CanShoot()
+	local canShootResult, gun = CanShootSilent()
 	if not canShootResult or not gun then return false end
 	local char = LocalPlayer.Character
 	local myHRP = char:FindFirstChild("HumanoidRootPart")
@@ -377,7 +627,6 @@ local function FireNormalShot()
 		gunRemote:FireServer("Shoot")
 	end
 	MainEvent:FireServer("ShootGun", gun.Handle, startPos, targetPos, mouse.Target or workspace.Terrain, mouse.TargetSurface and Vector3.FromNormalId(mouse.TargetSurface) or Vector3.new(0, 1, 0))
-	Silent.LastShot = tick()
 	return true
 end
 
@@ -417,8 +666,37 @@ local function OnSilentInputBegan(input, gameProcessed)
 	if gameProcessed then return end
 	if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
 	if not Silent.Active then return end
+	
+	isMouseHeld = true
+	
 	local gun = GetEquippedGun()
 	if not gun then return end
+	local target = GetTarget(Silent.FOV, true, true)
+	if target then
+		FireModifiedShot(target)
+	else
+		FireNormalShot()
+	end
+end
+
+local function OnSilentInputEnded(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		isMouseHeld = false
+	end
+end
+
+-- Continuous firing for automatic weapons while mouse is held
+local function OnSilentHoldUpdate()
+	if not Silent.Active then return end
+	if not isMouseHeld then return end
+	
+	local gun = GetEquippedGun()
+	if not gun then return end
+	
+	-- Check if gun has auto-fire capability (check fire rate or just fire continuously)
+	local canShootResult = CanShootSilent()
+	if not canShootResult then return end
+	
 	local target = GetTarget(Silent.FOV, true, true)
 	if target then
 		FireModifiedShot(target)
@@ -435,6 +713,7 @@ end
 local function EnableSilent()
 	if Silent.Active then return end
 	Silent.Active = true
+	isMouseHeld = false
 	local gun = GetEquippedGun()
 	if gun then
 		BlockGunInput(gun)
@@ -448,13 +727,17 @@ local function EnableSilent()
 		end)
 	end
 	Silent.InputConnection = UserInputService.InputBegan:Connect(OnSilentInputBegan)
+	Silent.InputEndConnection = UserInputService.InputEnded:Connect(OnSilentInputEnded)
 	Silent.RenderConnection = RunService.RenderStepped:Connect(OnSilentRenderStep)
+	-- Connection for continuous auto-fire while mouse is held
+	silentHoldConnection = RunService.Heartbeat:Connect(OnSilentHoldUpdate)
 end
 
 local function DisableSilent()
 	if not Silent.Active then return end
 	Silent.Active = false
 	Silent.CurrentTarget = nil
+	isMouseHeld = false
 	UnblockGunInput()
 	if Silent.CharacterConnection then
 		Silent.CharacterConnection:Disconnect()
@@ -464,34 +747,108 @@ local function DisableSilent()
 		Silent.InputConnection:Disconnect()
 		Silent.InputConnection = nil
 	end
+	if Silent.InputEndConnection then
+		Silent.InputEndConnection:Disconnect()
+		Silent.InputEndConnection = nil
+	end
 	if Silent.RenderConnection then
 		Silent.RenderConnection:Disconnect()
 		Silent.RenderConnection = nil
 	end
+	if silentHoldConnection then
+		silentHoldConnection:Disconnect()
+		silentHoldConnection = nil
+	end
 end
+
+-- Smooth factor calculation with improved curve for low values
+local function CalculateSmoothFactor(smoothness, deltaTime)
+	-- Smoothness 0 = instant (factor = 1)
+	-- Smoothness 0.95 = very smooth (factor approaches 0)
+	-- Using exponential curve for natural feel
+	
+	if smoothness <= 0.01 then
+		return 1 -- Instant aiming
+	end
+	
+	-- Base factor using exponential curve (smoother at low values)
+	local baseFactor = 1 - smoothness
+	
+	-- Apply exponential scaling for more control at low smoothness
+	-- This makes small smoothness values (0.1-0.3) feel more responsive
+	local expFactor = baseFactor ^ 0.7
+	
+	-- Scale by deltaTime for FPS independence (normalized to 60fps)
+	local targetDelta = 1 / 60
+	local deltaScale = deltaTime / targetDelta
+	
+	-- Apply cubic easing for natural acceleration
+	local eased = expFactor * expFactor * (3 - 2 * expFactor)
+	
+	-- Final factor with bounds
+	local finalFactor = math.clamp(eased * deltaScale, 0.02, 1)
+	
+	return finalFactor
+end
+
+local lastCameraLockTime = tick()
 
 local function StartCameraLock()
 	if CameraLock.Connection then return end
+	lastCameraLockTime = tick()
+	
 	CameraLock.Connection = RunService.RenderStepped:Connect(function()
 		if not CameraLock.Active then return end
 		if menuOpen then
 			CameraLock.CurrentTarget = nil
 			return
 		end
+		
+		local currentTime = tick()
+		local deltaTime = math.clamp(currentTime - lastCameraLockTime, 0.001, 0.1)
+		lastCameraLockTime = currentTime
+		
 		local target = GetTarget(CameraLock.FOV, Aimbot.VisibleCheck, false)
 		CameraLock.CurrentTarget = target
 		if not target or not target.Character then return end
+		
 		local hitbox = GetHitboxPart(target.Character, Aimbot.Hitbox)
 		if not hitbox then return end
+		
 		local targetPos = PredictPosition(target.Character, hitbox, CameraLock.Prediction)
 		if not targetPos then return end
+		
 		local screenPos, onScreen = WorldToScreen(targetPos)
 		if not onScreen then return end
+		
 		local mousePos = GetMousePosition()
 		local delta = screenPos - mousePos
-		local smoothFactor = 0.05 + (1 - CameraLock.Smoothness) * 0.25
+		local distance = delta.Magnitude
+		
+		-- Skip if already on target
+		if distance < 1 then return end
+		
+		-- Calculate smooth factor with improved curve
+		local smoothFactor = CalculateSmoothFactor(CameraLock.Smoothness, deltaTime)
+		
+		-- Apply distance-based scaling for more natural feel
+		-- Faster when far, slower when close (prevents overshooting)
+		local distanceScale = math.clamp(distance / 200, 0.3, 1.5)
+		smoothFactor = smoothFactor * distanceScale
+		
+		-- Apply deadzone to prevent jitter on small movements
+		local moveX = delta.X * smoothFactor
+		local moveY = delta.Y * smoothFactor
+		
+		if math.abs(moveX) < 0.5 and math.abs(delta.X) > 0.5 then
+			moveX = delta.X > 0 and 0.5 or -0.5
+		end
+		if math.abs(moveY) < 0.5 and math.abs(delta.Y) > 0.5 then
+			moveY = delta.Y > 0 and 0.5 or -0.5
+		end
+		
 		if mousemoverel then
-			mousemoverel(delta.X * smoothFactor, delta.Y * smoothFactor)
+			mousemoverel(moveX, moveY)
 		end
 	end)
 end
@@ -570,28 +927,6 @@ local function cleanupFly()
 		flyConnection:Disconnect()
 		flyConnection = nil
 	end
-	if flyBodyPosition then
-		flyBodyPosition:Destroy()
-		flyBodyPosition = nil
-	end
-	if flyBodyGyro then
-		flyBodyGyro:Destroy()
-		flyBodyGyro = nil
-	end
-	if flyCore then
-		flyCore:Destroy()
-		flyCore = nil
-	end
-	if workspace:FindFirstChild("FlyCore") then
-		workspace.FlyCore:Destroy()
-	end
-	local character = LocalPlayer.Character
-	if character then
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			humanoid.PlatformStand = false
-		end
-	end
 end
 
 local function cleanupCFrameSpeed()
@@ -599,21 +934,6 @@ local function cleanupCFrameSpeed()
 	if cframeSpeedConnection then
 		cframeSpeedConnection:Disconnect()
 		cframeSpeedConnection = nil
-	end
-	if cframeSpeedBodyPosition then
-		cframeSpeedBodyPosition:Destroy()
-		cframeSpeedBodyPosition = nil
-	end
-	if cframeSpeedBodyGyro then
-		cframeSpeedBodyGyro:Destroy()
-		cframeSpeedBodyGyro = nil
-	end
-	if cframeSpeedCore then
-		cframeSpeedCore:Destroy()
-		cframeSpeedCore = nil
-	end
-	if workspace:FindFirstChild("CFrameSpeedCore") then
-		workspace.CFrameSpeedCore:Destroy()
 	end
 end
 
@@ -631,27 +951,7 @@ local function cleanupJumpPower()
 	end
 end
 
-local function createCore(name)
-	local character, humanoid, rootPart = GetCharacterParts()
-	if not character then return nil end
-	if workspace:FindFirstChild(name) then
-		workspace[name]:Destroy()
-	end
-	local core = Instance.new("Part")
-	core.Name = name
-	core.Size = Vector3.new(0.05, 0.05, 0.05)
-	core.Transparency = 1
-	core.CanCollide = false
-	core.Anchored = false
-	core.Parent = workspace
-	local weld = Instance.new("Weld")
-	weld.Part0 = core
-	weld.Part1 = rootPart
-	weld.C0 = CFrame.new(0, 0, 0)
-	weld.Parent = core
-	return core
-end
-
+-- Improved Fly using CFrame method (less detectable than BodyPosition/BodyGyro)
 local function startFly()
 	if flyActive then return end
 	if cframeSpeedActive or cframeSpeedEnabled then
@@ -666,53 +966,42 @@ local function startFly()
 	end
 	local character, humanoid, rootPart = GetCharacterParts()
 	if not character then return end
-	flyCore = createCore("FlyCore")
-	if not flyCore then return end
-	task.wait()
-	flyBodyPosition = Instance.new("BodyPosition")
-	flyBodyPosition.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-	flyBodyPosition.Position = flyCore.Position
-	flyBodyPosition.D = 100
-	flyBodyPosition.P = 10000
-	flyBodyPosition.Parent = flyCore
-	flyBodyGyro = Instance.new("BodyGyro")
-	flyBodyGyro.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
-	flyBodyGyro.CFrame = flyCore.CFrame
-	flyBodyGyro.D = 100
-	flyBodyGyro.Parent = flyCore
 	flyActive = true
-	flyConnection = RunService.RenderStepped:Connect(function()
+	
+	flyConnection = RunService.Heartbeat:Connect(function()
 		if not flyEnabled or not flyActive then return end
 		local char, hum, root = GetCharacterParts()
-		if not char or not flyCore or not flyCore.Parent then
+		if not char or not root then
 			cleanupFly()
 			return
 		end
-		hum.PlatformStand = true
+		
 		local camera = workspace.CurrentCamera
-		local moveDirection = Vector3.new(0, 0, 0)
-		if movementKeys.w then
+		local moveDirection = Vector3.zero
+		
+		-- Check keys directly for more responsive flight
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then
 			moveDirection = moveDirection + camera.CFrame.LookVector
 		end
-		if movementKeys.s then
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) then
 			moveDirection = moveDirection - camera.CFrame.LookVector
 		end
-		if movementKeys.d then
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) then
 			moveDirection = moveDirection + camera.CFrame.RightVector
 		end
-		if movementKeys.a then
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) then
 			moveDirection = moveDirection - camera.CFrame.RightVector
 		end
+		
 		if moveDirection.Magnitude > 0 then
 			moveDirection = moveDirection.Unit
 		end
+		
 		local actualSpeed = calculateFlySpeed(flySpeed)
-		if flyBodyPosition then
-			flyBodyPosition.Position = flyBodyPosition.Position + moveDirection * actualSpeed
-		end
-		if flyBodyGyro then
-			flyBodyGyro.CFrame = camera.CFrame
-		end
+		
+		-- CFrame-based movement (less detectable)
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.CFrame = root.CFrame + moveDirection * actualSpeed
 	end)
 end
 
@@ -720,6 +1009,7 @@ local function stopFly()
 	cleanupFly()
 end
 
+-- Improved CFrame Speed using MoveDirection (less detectable)
 local function startCFrameSpeed()
 	if cframeSpeedActive then return end
 	if flyEnabled or flyActive then
@@ -734,22 +1024,9 @@ local function startCFrameSpeed()
 	end
 	local character, humanoid, rootPart = GetCharacterParts()
 	if not character then return end
-	cframeSpeedCore = createCore("CFrameSpeedCore")
-	if not cframeSpeedCore then return end
-	task.wait()
-	cframeSpeedBodyPosition = Instance.new("BodyPosition")
-	cframeSpeedBodyPosition.MaxForce = Vector3.new(math.huge, 0, math.huge)
-	cframeSpeedBodyPosition.Position = cframeSpeedCore.Position
-	cframeSpeedBodyPosition.D = 100
-	cframeSpeedBodyPosition.P = 10000
-	cframeSpeedBodyPosition.Parent = cframeSpeedCore
-	cframeSpeedBodyGyro = Instance.new("BodyGyro")
-	cframeSpeedBodyGyro.MaxTorque = Vector3.new(0, 9e9, 0)
-	cframeSpeedBodyGyro.CFrame = cframeSpeedCore.CFrame
-	cframeSpeedBodyGyro.D = 100
-	cframeSpeedBodyGyro.Parent = cframeSpeedCore
 	cframeSpeedActive = true
-	cframeSpeedConnection = RunService.RenderStepped:Connect(function()
+	
+	cframeSpeedConnection = RunService.Stepped:Connect(function()
 		if not cframeSpeedEnabled or not cframeSpeedActive then return end
 		if flyEnabled or flyActive then
 			cleanupCFrameSpeed()
@@ -763,44 +1040,16 @@ local function startCFrameSpeed()
 			return
 		end
 		local char, hum, root = GetCharacterParts()
-		if not char or not cframeSpeedCore or not cframeSpeedCore.Parent then
+		if not char or not root or not hum then
 			cleanupCFrameSpeed()
 			return
 		end
-		local camera = workspace.CurrentCamera
-		local moveDirection = Vector3.new(0, 0, 0)
-		local lookVector = camera.CFrame.LookVector
-		local rightVector = camera.CFrame.RightVector
-		lookVector = Vector3.new(lookVector.X, 0, lookVector.Z)
-		if lookVector.Magnitude > 0 then
-			lookVector = lookVector.Unit
-		end
-		rightVector = Vector3.new(rightVector.X, 0, rightVector.Z)
-		if rightVector.Magnitude > 0 then
-			rightVector = rightVector.Unit
-		end
-		if movementKeys.w then
-			moveDirection = moveDirection + lookVector
-		end
-		if movementKeys.s then
-			moveDirection = moveDirection - lookVector
-		end
-		if movementKeys.d then
-			moveDirection = moveDirection + rightVector
-		end
-		if movementKeys.a then
-			moveDirection = moveDirection - rightVector
-		end
+		
+		-- Use humanoid MoveDirection for natural movement (less detectable)
+		local moveDirection = hum.MoveDirection
 		if moveDirection.Magnitude > 0 then
-			moveDirection = moveDirection.Unit
-		end
-		local actualSpeed = calculateCFrameSpeed(cframeSpeedValue)
-		if cframeSpeedBodyPosition then
-			local newPos = cframeSpeedBodyPosition.Position + moveDirection * actualSpeed
-			cframeSpeedBodyPosition.Position = Vector3.new(newPos.X, cframeSpeedCore.Position.Y, newPos.Z)
-		end
-		if cframeSpeedBodyGyro and moveDirection.Magnitude > 0 then
-			cframeSpeedBodyGyro.CFrame = CFrame.lookAt(Vector3.new(0, 0, 0), moveDirection)
+			local actualSpeed = calculateCFrameSpeed(cframeSpeedValue)
+			root.CFrame = root.CFrame + moveDirection * actualSpeed
 		end
 	end)
 end
@@ -963,10 +1212,19 @@ end
 local function onCharacterAdded(character)
 	isResetting = true
 	cleanupAll()
+	isMouseHeld = false
 	if Silent.Active then
 		UnblockGunInput()
 		Silent.BlockedConnections = {}
 	end
+	
+	-- Clear velocity cache and health tracking for respawn
+	previousPositions = {}
+	smoothedVelocities = {}
+	lastUpdateTimes = {}
+	accelerationCache = {}
+	lastTargetHealth = {}
+	
 	local humanoid = character:WaitForChild("Humanoid", 10)
 	if not humanoid then
 		isResetting = false
@@ -1087,6 +1345,49 @@ GlobalSection:AddDropdown({
 	Flag = "Hitbox"
 })
 
+GlobalSection:AddToggle({
+	Name = "Hit Sound",
+	Default = false,
+	Callback = function(v)
+		HitSound.Enabled = v
+		if v then
+			startHitSoundMonitor()
+		else
+			stopHitSoundMonitor()
+		end
+	end,
+	Flag = "HitSoundEnabled"
+})
+
+local HitSoundOptions = {}
+for name, _ in pairs(HitSound.Sounds) do
+	table.insert(HitSoundOptions, name)
+end
+table.sort(HitSoundOptions)
+
+GlobalSection:AddDropdown({
+	Name = "Sound Type",
+	Values = HitSoundOptions,
+	Default = "Bubble",
+	Callback = function(v)
+		HitSound.SelectedSound = v
+	end,
+	Flag = "HitSoundType"
+})
+
+GlobalSection:AddSlider({
+	Name = "Sound Volume",
+	Type = "",
+	Default = 1,
+	Min = 0.1,
+	Max = 5,
+	Round = 1,
+	Callback = function(v)
+		HitSound.Volume = v
+	end,
+	Flag = "HitSoundVolume"
+})
+
 local CameraLockSection = Legit:AddSection({ Name = "Camera Lock", Side = "left", ShowTitle = true, Height = 0 })
 
 local CameraLockToggle = CameraLockSection:AddToggle({
@@ -1136,7 +1437,7 @@ CameraLockSection:AddSlider({
 })
 
 CameraLockSection:AddSlider({
-	Name = "Smoothness",
+	Name = "Prediction",
 	Type = "",
 	Default = 0.5,
 	Min = 0,
@@ -1183,15 +1484,40 @@ SilentSection:AddSlider({
 	Flag = "SilentFOV"
 })
 
+SilentSection:AddToggle({
+	Name = "Velocity Resolver",
+	Default = false,
+	Callback = function(v) Silent.Resolver = v end,
+	Flag = "SilentResolver"
+})
+
 SilentSection:AddSlider({
-	Name = "Prediction",
+	Name = "Jump Offset",
 	Type = "",
-	Default = 0.1,
-	Min = 0,
-	Max = 0.5,
+	Default = 0,
+	Min = -1,
+	Max = 1,
 	Round = 2,
-	Callback = function(v) Silent.Prediction = v end,
-	Flag = "SilentPrediction"
+	Callback = function(v) Silent.JumpOffset = v end,
+	Flag = "SilentJumpOffset"
+})
+
+SilentSection:AddToggle({
+	Name = "Auto Prediction",
+	Default = false,
+	Callback = function(v) Silent.AutoPrediction = v end,
+	Flag = "SilentAutoPrediction"
+})
+
+SilentSection:AddSlider({
+	Name = "Auto Pred Divisor",
+	Type = "",
+	Default = 250,
+	Min = 200,
+	Max = 350,
+	Round = 0,
+	Callback = function(v) Silent.AutoPredictionDivisor = v end,
+	Flag = "SilentAutoPredDivisor"
 })
 
 local FOVVisualsSection = Visuals:AddSection({ Name = "FOV Circles", Side = "left", ShowTitle = true, Height = 0 })
@@ -1236,8 +1562,8 @@ local Movement = Misc:AddSection({ Name = "Movement", Side = "left", ShowTitle =
 UIElements.FlySlider = Movement:AddSlider({
 	Name = "Fly Speed",
 	Type = "",
-	Default = 0,
-	Min = 0,
+	Default = 50,
+	Min = 1,
 	Max = 100,
 	Round = 0,
 	Callback = function(value)
@@ -1276,8 +1602,8 @@ end
 UIElements.CFrameSpeedSlider = Movement:AddSlider({
 	Name = "CFrame Speed",
 	Type = "",
-	Default = 0,
-	Min = 0,
+	Default = 50,
+	Min = 1,
 	Max = 100,
 	Round = 0,
 	Callback = function(value)
@@ -1490,14 +1816,46 @@ UI:AddKeybind({
 	end
 })
 
-UI:AddColorPicker({ Name = "Background", Default = customTheme.Background, Callback = function(c) Window:SetTheme({ Background = c, Panel = c }) end, Flag = "MainColor" })
-UI:AddColorPicker({ Name = "Accent", Default = customTheme.Accent, Callback = function(c) Window:SetTheme({ Accent = c, SliderAccent = c, ToggleAccent = c, TabSelected = c, ProfileStroke = c }) end, Flag = "AccentColor" })
-UI:AddColorPicker({ Name = "Text", Default = customTheme.Text, Callback = function(c) Window:SetTheme({ Text = c }) end, Flag = "TextColor" })
-UI:AddColorPicker({ 
-	Name = "Slider", 
-	Default = customTheme.SliderAccent, 
-	Callback = function(c) Window:SetTheme({ SliderAccent = c }) end, 
-	Flag = "SliderColor" 
+UI:AddColorPicker({
+	Name = "Background",
+	Default = customTheme.Background,
+	Callback = function(c)
+		Window:SetTheme({ Background = c, Panel = c })
+	end,
+	Flag = "MainColor"
+})
+
+UI:AddColorPicker({
+	Name = "Accent",
+	Default = customTheme.Accent,
+	Callback = function(c)
+		Window:SetTheme({
+			Accent = c,
+			SliderAccent = c,
+			ToggleAccent = c,
+			TabSelected = c,
+			ProfileStroke = c
+		})
+	end,
+	Flag = "AccentColor"
+})
+
+UI:AddColorPicker({
+	Name = "Text",
+	Default = customTheme.Text,
+	Callback = function(c)
+		Window:SetTheme({ Text = c })
+	end,
+	Flag = "TextColor"
+})
+
+UI:AddColorPicker({
+	Name = "Slider",
+	Default = customTheme.SliderAccent,
+	Callback = function(c)
+		Window:SetTheme({ SliderAccent = c })
+	end,
+	Flag = "SliderColor"
 })
 
 UI:AddColorPicker({ 

@@ -77,35 +77,24 @@ local Silent = {
 	InputEndConnection = nil,
 	RenderConnection = nil,
 	CharacterConnection = nil,
-	-- Advanced prediction settings
 	Resolver = false,
 	JumpOffset = 0,
 	AutoPrediction = false,
 	AutoPredictionDivisor = 250,
+	UseInterceptModel = true,
+	ProjectileSpeed = 1000,
+	Tau = 0.15,
 }
 
--- Prediction constants
 local PREDICTION_BASE = 0.095
-local PREDICTION_PING_SCALE = 0.0005
+local PREDICTION_TAU = 0.15
+local PROJECTILE_SPEED = 1000
+local SERVER_TICK_INTERVAL = 1/60
+local MAX_INTERCEPT_TIME = 2.0
 local VELOCITY_SMOOTH_ALPHA = 0.4
 local VELOCITY_MAX_MAGNITUDE = 150
 local JUMP_STATE_OFFSET_MULTIPLIER = 1.0
-local BULLET_TRAVEL_TIME_ESTIMATE = 0.015
 
--- Ping-based prediction table (fallback)
-local PredictionTable = {
-	{ping = 200, value = 0.185},
-	{ping = 150, value = 0.165},
-	{ping = 120, value = 0.150},
-	{ping = 100, value = 0.140},
-	{ping = 80, value = 0.130},
-	{ping = 60, value = 0.120},
-	{ping = 40, value = 0.110},
-	{ping = 20, value = 0.100},
-	{ping = 0, value = 0.095},
-}
-
--- Velocity tracking for smooth prediction
 local previousPositions = {}
 local smoothedVelocities = {}
 local lastUpdateTimes = {}
@@ -136,7 +125,6 @@ local cframeSpeedValue = 1
 local cframeSpeedConnection = nil
 local cframeSpeedActive = false
 
--- HitSound settings
 local HitSound = {
 	Enabled = false,
 	Volume = 1,
@@ -173,7 +161,6 @@ local HitSound = {
 }
 local lastTargetHealth = {}
 
--- Silent aim mouse hold tracking
 local isMouseHeld = false
 local silentHoldConnection = nil
 
@@ -199,7 +186,6 @@ local antiflingConnection = nil
 
 local UIElements = {}
 
--- Movement speed constants
 local FLY_MIN_SPEED = 0.5
 local FLY_MAX_SPEED = 5
 local CFRAME_MIN_SPEED = 0.1
@@ -213,18 +199,13 @@ local function calculateCFrameSpeed(sliderValue)
 	return CFRAME_MIN_SPEED + (sliderValue / 100) * (CFRAME_MAX_SPEED - CFRAME_MIN_SPEED)
 end
 
--- HitSound function
 local function playHitSound()
 	if not HitSound.Enabled then return end
-	
-	-- Cooldown check to prevent sound spam
 	local currentTime = tick()
 	if currentTime - HitSound.LastSoundTime < HitSound.SoundCooldown then return end
 	HitSound.LastSoundTime = currentTime
-	
 	local soundId = HitSound.Sounds[HitSound.SelectedSound]
 	if not soundId then return end
-	
 	local sound = Instance.new("Sound")
 	sound.SoundId = soundId
 	sound.Volume = HitSound.Volume
@@ -235,7 +216,6 @@ local function playHitSound()
 	end)
 end
 
--- Get current active target (from CameraLock or Silent)
 local function getCurrentTarget()
 	if CameraLock.Active and CameraLock.CurrentTarget then
 		return CameraLock.CurrentTarget
@@ -246,36 +226,27 @@ local function getCurrentTarget()
 	return nil
 end
 
--- Start HitSound monitoring
 local function startHitSoundMonitor()
 	if HitSound.Connection then return end
-	
 	HitSound.Connection = RunService.Heartbeat:Connect(function()
 		if not HitSound.Enabled then return end
-		
 		local target = getCurrentTarget()
 		if not target or not target.Character then return end
-		
 		local humanoid = target.Character:FindFirstChildOfClass("Humanoid")
 		if not humanoid then return end
-		
 		local playerName = target.Name
 		local currentHealth = humanoid.Health
-		
 		if not lastTargetHealth[playerName] then
 			lastTargetHealth[playerName] = currentHealth
 			return
 		end
-		
 		if currentHealth < lastTargetHealth[playerName] then
 			playHitSound()
 		end
-		
 		lastTargetHealth[playerName] = currentHealth
 	end)
 end
 
--- Stop HitSound monitoring
 local function stopHitSoundMonitor()
 	if HitSound.Connection then
 		HitSound.Connection:Disconnect()
@@ -360,130 +331,136 @@ local function GetHitboxPart(character, hitboxName)
 	return character:FindFirstChild("HumanoidRootPart")
 end
 
--- Get current ping
 local function GetPing()
 	local ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
 	return ping
 end
 
--- Get prediction multiplier based on ping (with auto prediction support)
-local function GetPredictionMultiplier(useAutoPred, autoPredDivisor)
-	local ping = GetPing()
-	
-	if useAutoPred then
-		local divisor = autoPredDivisor or Silent.AutoPredictionDivisor
-		return PREDICTION_BASE + (ping / divisor) * 0.1
-	end
-	
-	for _, data in ipairs(PredictionTable) do
-		if ping >= data.ping then
-			return data.value
-		end
-	end
-	return PREDICTION_BASE
+local function CalculateSmoothAlpha(deltaTime, tau)
+	return 1 - math.exp(-deltaTime / tau)
 end
 
--- Get smoothed velocity for a player with improved interpolation
 local function GetSmoothedVelocity(character, useResolver)
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	if not rootPart then return Vector3.zero end
-	
+	if not rootPart then return Vector3.zero, Vector3.zero end
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local player = Players:GetPlayerFromCharacter(character)
-	
-	-- Resolver mode: use MoveDirection * WalkSpeed (more stable)
+	local tau = Silent.Tau or PREDICTION_TAU
 	if useResolver and humanoid then
 		local moveDir = humanoid.MoveDirection
 		local walkSpeed = humanoid.WalkSpeed
 		if moveDir.Magnitude > 0 then
-			return moveDir * walkSpeed
+			return moveDir * walkSpeed, Vector3.zero
 		end
-		return Vector3.zero
+		return Vector3.zero, Vector3.zero
 	end
-	
-	-- Standard mode: use smoothed physics velocity
 	if not player then 
 		local velocity = rootPart.AssemblyLinearVelocity
 		if velocity.Magnitude > VELOCITY_MAX_MAGNITUDE then
-			return velocity.Unit * VELOCITY_MAX_MAGNITUDE
+			velocity = velocity.Unit * VELOCITY_MAX_MAGNITUDE
 		end
-		return velocity
+		return velocity, Vector3.zero
 	end
-	
 	local currentTime = tick()
 	local currentPos = rootPart.Position
 	local lastPos = previousPositions[player] or currentPos
 	local lastTime = lastUpdateTimes[player] or (currentTime - 0.016)
-	
 	local deltaTime = math.max(currentTime - lastTime, 0.001)
 	local rawVelocity = (currentPos - lastPos) / deltaTime
-	
-	-- Clamp raw velocity to prevent extreme values
 	if rawVelocity.Magnitude > VELOCITY_MAX_MAGNITUDE then
 		rawVelocity = rawVelocity.Unit * VELOCITY_MAX_MAGNITUDE
 	end
-	
-	-- Exponential smoothing with adaptive alpha
+	local alpha = CalculateSmoothAlpha(deltaTime, tau)
 	local prevSmoothed = smoothedVelocities[player] or rawVelocity
-	local alpha = math.clamp(VELOCITY_SMOOTH_ALPHA * (deltaTime / 0.016), 0.1, 0.8)
 	local smoothed = prevSmoothed:Lerp(rawVelocity, alpha)
-	
-	-- Track acceleration for better prediction
 	local prevVelocity = smoothedVelocities[player] or smoothed
-	accelerationCache[player] = (smoothed - prevVelocity) / deltaTime
-	
+	local rawAccel = (smoothed - prevVelocity) / deltaTime
+	local prevAccel = accelerationCache[player] or rawAccel
+	local accelAlpha = CalculateSmoothAlpha(deltaTime, tau * 2)
+	local smoothedAccel = prevAccel:Lerp(rawAccel, accelAlpha)
+	accelerationCache[player] = smoothedAccel
 	smoothedVelocities[player] = smoothed
 	previousPositions[player] = currentPos
 	lastUpdateTimes[player] = currentTime
-	
-	return smoothed
+	return smoothed, smoothedAccel
 end
 
--- Calculate jump offset based on humanoid state
 local function GetJumpOffset(character, baseOffset)
 	if baseOffset == 0 then return 0 end
-	
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then return 0 end
-	
 	local state = humanoid:GetState()
 	if state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping then
 		return baseOffset * JUMP_STATE_OFFSET_MULTIPLIER
 	end
-	
 	return 0
 end
 
--- Advanced prediction for Silent Aim with all features
+local function CalculateInterceptTime(targetPos, targetVel, shooterPos, projectileSpeed)
+	local r = targetPos - shooterPos
+	local a = targetVel:Dot(targetVel) - projectileSpeed * projectileSpeed
+	local b = 2 * r:Dot(targetVel)
+	local c = r:Dot(r)
+	if math.abs(a) < 0.0001 then
+		if math.abs(b) < 0.0001 then
+			return r.Magnitude / math.max(projectileSpeed, 1)
+		end
+		local t = -c / b
+		if t > 0 then
+			return math.clamp(t, 0, MAX_INTERCEPT_TIME)
+		end
+		return r.Magnitude / math.max(projectileSpeed, 1)
+	end
+	local discriminant = b * b - 4 * a * c
+	if discriminant < 0 then
+		return r.Magnitude / math.max(projectileSpeed, 1)
+	end
+	local sqrtDisc = math.sqrt(discriminant)
+	local t1 = (-b - sqrtDisc) / (2 * a)
+	local t2 = (-b + sqrtDisc) / (2 * a)
+	local t = math.huge
+	if t1 > 0.001 and t1 < t then t = t1 end
+	if t2 > 0.001 and t2 < t then t = t2 end
+	if t == math.huge or t ~= t then
+		return r.Magnitude / math.max(projectileSpeed, 1)
+	end
+	return math.clamp(t, 0, MAX_INTERCEPT_TIME)
+end
+
 local function PredictPositionSilent(character, hitbox)
 	if not hitbox then return nil end
-	
 	local useResolver = Silent.Resolver
 	local jumpOffset = Silent.JumpOffset
-	local useAutoPred = Silent.AutoPrediction
-	
-	local velocity = GetSmoothedVelocity(character, useResolver)
-	local prediction = GetPredictionMultiplier(useAutoPred, Silent.AutoPredictionDivisor)
-	
-	-- Calculate jump offset
-	local yOffset = GetJumpOffset(character, jumpOffset)
-	
-	-- Get distance to target for travel time compensation
+	local useInterceptModel = Silent.UseInterceptModel
+	local projectileSpeed = Silent.ProjectileSpeed or PROJECTILE_SPEED
+	local velocity, acceleration = GetSmoothedVelocity(character, useResolver)
 	local myChar = LocalPlayer.Character
 	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-	if myRoot then
-		local distance = (hitbox.Position - myRoot.Position).Magnitude
-		local travelTimeCompensation = distance * BULLET_TRAVEL_TIME_ESTIMATE * 0.001
-		prediction = prediction + travelTimeCompensation
+	if not myRoot then
+		local ping = GetPing()
+		local t_net = (ping / 1000) / 2
+		return hitbox.Position + velocity * t_net
 	end
-	
-	-- Apply acceleration compensation for changing velocity
-	local player = Players:GetPlayerFromCharacter(character)
-	local accel = player and accelerationCache[player] or Vector3.zero
-	local accelCompensation = accel * prediction * prediction * 0.5
-	
-	local predictedPos = hitbox.Position + (velocity * prediction) + accelCompensation + Vector3.new(0, yOffset, 0)
-	
+	local shooterPos = myRoot.Position + Vector3.new(0, 2, 0)
+	local targetPos = hitbox.Position
+	local ping = GetPing()
+	local t_net = (ping / 1000) / 2
+	local t_tick = SERVER_TICK_INTERVAL / 2
+	local t_proj
+	if useInterceptModel and projectileSpeed > 0 then
+		t_proj = CalculateInterceptTime(targetPos, velocity, shooterPos, projectileSpeed)
+	else
+		if Silent.AutoPrediction then
+			local divisor = Silent.AutoPredictionDivisor or 250
+			t_proj = PREDICTION_BASE + (ping / divisor) * 0.1
+		else
+			local distance = (targetPos - shooterPos).Magnitude
+			t_proj = distance / math.max(projectileSpeed, 1)
+		end
+	end
+	local t = t_net + t_tick + t_proj
+	local yOffset = GetJumpOffset(character, jumpOffset)
+	local predictedPos = targetPos + (velocity * t) + (acceleration * 0.5 * t * t) + Vector3.new(0, yOffset, 0)
 	return predictedPos
 end
 
@@ -666,9 +643,7 @@ local function OnSilentInputBegan(input, gameProcessed)
 	if gameProcessed then return end
 	if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
 	if not Silent.Active then return end
-	
 	isMouseHeld = true
-	
 	local gun = GetEquippedGun()
 	if not gun then return end
 	local target = GetTarget(Silent.FOV, true, true)
@@ -685,18 +660,13 @@ local function OnSilentInputEnded(input)
 	end
 end
 
--- Continuous firing for automatic weapons while mouse is held
 local function OnSilentHoldUpdate()
 	if not Silent.Active then return end
 	if not isMouseHeld then return end
-	
 	local gun = GetEquippedGun()
 	if not gun then return end
-	
-	-- Check if gun has auto-fire capability (check fire rate or just fire continuously)
 	local canShootResult = CanShootSilent()
 	if not canShootResult then return end
-	
 	local target = GetTarget(Silent.FOV, true, true)
 	if target then
 		FireModifiedShot(target)
@@ -729,7 +699,6 @@ local function EnableSilent()
 	Silent.InputConnection = UserInputService.InputBegan:Connect(OnSilentInputBegan)
 	Silent.InputEndConnection = UserInputService.InputEnded:Connect(OnSilentInputEnded)
 	Silent.RenderConnection = RunService.RenderStepped:Connect(OnSilentRenderStep)
-	-- Connection for continuous auto-fire while mouse is held
 	silentHoldConnection = RunService.Heartbeat:Connect(OnSilentHoldUpdate)
 end
 
@@ -761,33 +730,16 @@ local function DisableSilent()
 	end
 end
 
--- Smooth factor calculation with improved curve for low values
 local function CalculateSmoothFactor(smoothness, deltaTime)
-	-- Smoothness 0 = instant (factor = 1)
-	-- Smoothness 0.95 = very smooth (factor approaches 0)
-	-- Using exponential curve for natural feel
-	
 	if smoothness <= 0.01 then
-		return 1 -- Instant aiming
+		return 1
 	end
-	
-	-- Base factor using exponential curve (smoother at low values)
 	local baseFactor = 1 - smoothness
-	
-	-- Apply exponential scaling for more control at low smoothness
-	-- This makes small smoothness values (0.1-0.3) feel more responsive
 	local expFactor = baseFactor ^ 0.7
-	
-	-- Scale by deltaTime for FPS independence (normalized to 60fps)
 	local targetDelta = 1 / 60
 	local deltaScale = deltaTime / targetDelta
-	
-	-- Apply cubic easing for natural acceleration
 	local eased = expFactor * expFactor * (3 - 2 * expFactor)
-	
-	-- Final factor with bounds
 	local finalFactor = math.clamp(eased * deltaScale, 0.02, 1)
-	
 	return finalFactor
 end
 
@@ -796,57 +748,39 @@ local lastCameraLockTime = tick()
 local function StartCameraLock()
 	if CameraLock.Connection then return end
 	lastCameraLockTime = tick()
-	
 	CameraLock.Connection = RunService.RenderStepped:Connect(function()
 		if not CameraLock.Active then return end
 		if menuOpen then
 			CameraLock.CurrentTarget = nil
 			return
 		end
-		
 		local currentTime = tick()
 		local deltaTime = math.clamp(currentTime - lastCameraLockTime, 0.001, 0.1)
 		lastCameraLockTime = currentTime
-		
 		local target = GetTarget(CameraLock.FOV, Aimbot.VisibleCheck, false)
 		CameraLock.CurrentTarget = target
 		if not target or not target.Character then return end
-		
 		local hitbox = GetHitboxPart(target.Character, Aimbot.Hitbox)
 		if not hitbox then return end
-		
 		local targetPos = PredictPosition(target.Character, hitbox, CameraLock.Prediction)
 		if not targetPos then return end
-		
 		local screenPos, onScreen = WorldToScreen(targetPos)
 		if not onScreen then return end
-		
 		local mousePos = GetMousePosition()
 		local delta = screenPos - mousePos
 		local distance = delta.Magnitude
-		
-		-- Skip if already on target
 		if distance < 1 then return end
-		
-		-- Calculate smooth factor with improved curve
 		local smoothFactor = CalculateSmoothFactor(CameraLock.Smoothness, deltaTime)
-		
-		-- Apply distance-based scaling for more natural feel
-		-- Faster when far, slower when close (prevents overshooting)
 		local distanceScale = math.clamp(distance / 200, 0.3, 1.5)
 		smoothFactor = smoothFactor * distanceScale
-		
-		-- Apply deadzone to prevent jitter on small movements
 		local moveX = delta.X * smoothFactor
 		local moveY = delta.Y * smoothFactor
-		
 		if math.abs(moveX) < 0.5 and math.abs(delta.X) > 0.5 then
 			moveX = delta.X > 0 and 0.5 or -0.5
 		end
 		if math.abs(moveY) < 0.5 and math.abs(delta.Y) > 0.5 then
 			moveY = delta.Y > 0 and 0.5 or -0.5
 		end
-		
 		if mousemoverel then
 			mousemoverel(moveX, moveY)
 		end
@@ -951,7 +885,6 @@ local function cleanupJumpPower()
 	end
 end
 
--- Improved Fly using CFrame method (less detectable than BodyPosition/BodyGyro)
 local function startFly()
 	if flyActive then return end
 	if cframeSpeedActive or cframeSpeedEnabled then
@@ -967,7 +900,6 @@ local function startFly()
 	local character, humanoid, rootPart = GetCharacterParts()
 	if not character then return end
 	flyActive = true
-	
 	flyConnection = RunService.Heartbeat:Connect(function()
 		if not flyEnabled or not flyActive then return end
 		local char, hum, root = GetCharacterParts()
@@ -975,11 +907,8 @@ local function startFly()
 			cleanupFly()
 			return
 		end
-		
 		local camera = workspace.CurrentCamera
 		local moveDirection = Vector3.zero
-		
-		-- Check keys directly for more responsive flight
 		if UserInputService:IsKeyDown(Enum.KeyCode.W) then
 			moveDirection = moveDirection + camera.CFrame.LookVector
 		end
@@ -992,14 +921,10 @@ local function startFly()
 		if UserInputService:IsKeyDown(Enum.KeyCode.A) then
 			moveDirection = moveDirection - camera.CFrame.RightVector
 		end
-		
 		if moveDirection.Magnitude > 0 then
 			moveDirection = moveDirection.Unit
 		end
-		
 		local actualSpeed = calculateFlySpeed(flySpeed)
-		
-		-- CFrame-based movement (less detectable)
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.CFrame = root.CFrame + moveDirection * actualSpeed
 	end)
@@ -1009,7 +934,6 @@ local function stopFly()
 	cleanupFly()
 end
 
--- Improved CFrame Speed using MoveDirection (less detectable)
 local function startCFrameSpeed()
 	if cframeSpeedActive then return end
 	if flyEnabled or flyActive then
@@ -1025,7 +949,6 @@ local function startCFrameSpeed()
 	local character, humanoid, rootPart = GetCharacterParts()
 	if not character then return end
 	cframeSpeedActive = true
-	
 	cframeSpeedConnection = RunService.Stepped:Connect(function()
 		if not cframeSpeedEnabled or not cframeSpeedActive then return end
 		if flyEnabled or flyActive then
@@ -1044,8 +967,6 @@ local function startCFrameSpeed()
 			cleanupCFrameSpeed()
 			return
 		end
-		
-		-- Use humanoid MoveDirection for natural movement (less detectable)
 		local moveDirection = hum.MoveDirection
 		if moveDirection.Magnitude > 0 then
 			local actualSpeed = calculateCFrameSpeed(cframeSpeedValue)
@@ -1217,14 +1138,11 @@ local function onCharacterAdded(character)
 		UnblockGunInput()
 		Silent.BlockedConnections = {}
 	end
-	
-	-- Clear velocity cache and health tracking for respawn
 	previousPositions = {}
 	smoothedVelocities = {}
 	lastUpdateTimes = {}
 	accelerationCache = {}
 	lastTargetHealth = {}
-	
 	local humanoid = character:WaitForChild("Humanoid", 10)
 	if not humanoid then
 		isResetting = false
@@ -1482,6 +1400,35 @@ SilentSection:AddSlider({
 	Round = 0,
 	Callback = function(v) Silent.FOV = v end,
 	Flag = "SilentFOV"
+})
+
+SilentSection:AddToggle({
+	Name = "Intercept Model",
+	Default = true,
+	Callback = function(v) Silent.UseInterceptModel = v end,
+	Flag = "SilentInterceptModel"
+})
+
+SilentSection:AddSlider({
+	Name = "Projectile Speed",
+	Type = "u/s",
+	Default = 1000,
+	Min = 100,
+	Max = 5000,
+	Round = 0,
+	Callback = function(v) Silent.ProjectileSpeed = v end,
+	Flag = "SilentProjectileSpeed"
+})
+
+SilentSection:AddSlider({
+	Name = "Smoothing Tau",
+	Type = "s",
+	Default = 0.15,
+	Min = 0.05,
+	Max = 0.50,
+	Round = 2,
+	Callback = function(v) Silent.Tau = v end,
+	Flag = "SilentTau"
 })
 
 SilentSection:AddToggle({

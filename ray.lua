@@ -81,16 +81,12 @@ local Silent = {
 	JumpOffset = 0,
 	AutoPrediction = false,
 	AutoPredictionDivisor = 250,
-	UseInterceptModel = true,
-	ProjectileSpeed = 1000,
 	Tau = 0.15,
 }
 
 local PREDICTION_BASE = 0.095
 local PREDICTION_TAU = 0.15
-local PROJECTILE_SPEED = 1000
 local SERVER_TICK_INTERVAL = 1/60
-local MAX_INTERCEPT_TIME = 2.0
 local VELOCITY_SMOOTH_ALPHA = 0.4
 local VELOCITY_MAX_MAGNITUDE = 150
 local JUMP_STATE_OFFSET_MULTIPLIER = 1.0
@@ -125,44 +121,41 @@ local cframeSpeedValue = 1
 local cframeSpeedConnection = nil
 local cframeSpeedActive = false
 
-local HitSound = {
-	Enabled = false,
-	Volume = 1,
-	SelectedSound = "Bubble",
-	Sounds = {
-		["Bubble"] = "rbxassetid://6534947588",
-		["Lazer"] = "rbxassetid://130791043",
-		["Pick"] = "rbxassetid://1347140027",
-		["Pop"] = "rbxassetid://198598793",
-		["Rust"] = "rbxassetid://1255040462",
-		["Sans"] = "rbxassetid://152745539",
-		["Fart"] = "rbxassetid://449860068",
-		["Big"] = "rbxassetid://554081908",
-		["Vine"] = "rbxassetid://352543648",
-		["UwU"] = "rbxassetid://4841131517",
-		["Bruh"] = "rbxassetid://5734063719",
-		["Skeet"] = "rbxassetid://1265316264",
-		["Neverlose"] = "rbxassetid://4817809188",
-		["Fatality"] = "rbxassetid://5424968049",
-		["Bonk"] = "rbxassetid://4606604453",
-		["Minecraft"] = "rbxassetid://4018616850",
-		["Gamesense"] = "rbxassetid://4018616850",
-		["RIFK7"] = "rbxassetid://318620857",
-		["Bamboo"] = "rbxassetid://5022625084",
-		["Crowbar"] = "rbxassetid://1321060532",
-		["Weeb"] = "rbxassetid://718613635",
-		["Beep"] = "rbxassetid://8327813988",
-		["Osu"] = "rbxassetid://7147454322",
-		["Mario"] = "rbxassetid://187011839",
-	},
-	Connection = nil,
-	LastSoundTime = 0,
-	SoundCooldown = 0.1,
-}
-local lastTargetHealth = {}
 
 local isMouseHeld = false
 local silentHoldConnection = nil
+local silentSpeedFixConnection = nil
+local savedWalkSpeed = 16
+
+-- Оружия, на которых зажим НЕ работает (только одиночные выстрелы)
+local NO_HOLD_FIRE_WEAPONS = {
+	["GLOCK"] = true,
+	["SILENCER"] = true,
+	["DOUBLE BARREL"] = true,
+	["SHOTGUN"] = true,
+	["TACTICAL SHOTGUN"] = true,
+	["REVOLVER"] = true,
+	["AUG"] = true,
+}
+
+-- Оружия, которые вообще не должны работать с сайлентом
+local NO_SILENT_WEAPONS = {
+	["GRENADE"] = true,
+	["RPG"] = true,
+	["FLAMETHROWER"] = true,
+}
+
+-- Ближнее оружие (не должно работать с сайлентом)
+local MELEE_WEAPONS = {
+	["PITCHFORK"] = true,
+	["KNIFE"] = true,
+	["BAT"] = true,
+	["STOP SIGN"] = true,
+	["SHOVEL"] = true,
+	["SLEDGEHAMMER"] = true,
+	["KICKBOXING"] = true,
+	["BOXING"] = true,
+}
 
 local walkSpeedEnabled = false
 local jumpPowerEnabled = false
@@ -199,23 +192,6 @@ local function calculateCFrameSpeed(sliderValue)
 	return CFRAME_MIN_SPEED + (sliderValue / 100) * (CFRAME_MAX_SPEED - CFRAME_MIN_SPEED)
 end
 
-local function playHitSound()
-	if not HitSound.Enabled then return end
-	local currentTime = tick()
-	if currentTime - HitSound.LastSoundTime < HitSound.SoundCooldown then return end
-	HitSound.LastSoundTime = currentTime
-	local soundId = HitSound.Sounds[HitSound.SelectedSound]
-	if not soundId then return end
-	local sound = Instance.new("Sound")
-	sound.SoundId = soundId
-	sound.Volume = HitSound.Volume
-	sound.Parent = workspace
-	sound:Play()
-	sound.Ended:Connect(function()
-		sound:Destroy()
-	end)
-end
-
 local function getCurrentTarget()
 	if CameraLock.Active and CameraLock.CurrentTarget then
 		return CameraLock.CurrentTarget
@@ -224,34 +200,6 @@ local function getCurrentTarget()
 		return Silent.CurrentTarget
 	end
 	return nil
-end
-
-local function startHitSoundMonitor()
-	if HitSound.Connection then return end
-	HitSound.Connection = RunService.Heartbeat:Connect(function()
-		if not HitSound.Enabled then return end
-		local target = getCurrentTarget()
-		if not target or not target.Character then return end
-		local humanoid = target.Character:FindFirstChildOfClass("Humanoid")
-		if not humanoid then return end
-		local playerName = target.Name
-		local currentHealth = humanoid.Health
-		if not lastTargetHealth[playerName] then
-			lastTargetHealth[playerName] = currentHealth
-			return
-		end
-		if currentHealth < lastTargetHealth[playerName] then
-			playHitSound()
-		end
-		lastTargetHealth[playerName] = currentHealth
-	end)
-end
-
-local function stopHitSoundMonitor()
-	if HitSound.Connection then
-		HitSound.Connection:Disconnect()
-		HitSound.Connection = nil
-	end
 end
 
 local function GetCharacterParts(player)
@@ -396,43 +344,10 @@ local function GetJumpOffset(character, baseOffset)
 	return 0
 end
 
-local function CalculateInterceptTime(targetPos, targetVel, shooterPos, projectileSpeed)
-	local r = targetPos - shooterPos
-	local a = targetVel:Dot(targetVel) - projectileSpeed * projectileSpeed
-	local b = 2 * r:Dot(targetVel)
-	local c = r:Dot(r)
-	if math.abs(a) < 0.0001 then
-		if math.abs(b) < 0.0001 then
-			return r.Magnitude / math.max(projectileSpeed, 1)
-		end
-		local t = -c / b
-		if t > 0 then
-			return math.clamp(t, 0, MAX_INTERCEPT_TIME)
-		end
-		return r.Magnitude / math.max(projectileSpeed, 1)
-	end
-	local discriminant = b * b - 4 * a * c
-	if discriminant < 0 then
-		return r.Magnitude / math.max(projectileSpeed, 1)
-	end
-	local sqrtDisc = math.sqrt(discriminant)
-	local t1 = (-b - sqrtDisc) / (2 * a)
-	local t2 = (-b + sqrtDisc) / (2 * a)
-	local t = math.huge
-	if t1 > 0.001 and t1 < t then t = t1 end
-	if t2 > 0.001 and t2 < t then t = t2 end
-	if t == math.huge or t ~= t then
-		return r.Magnitude / math.max(projectileSpeed, 1)
-	end
-	return math.clamp(t, 0, MAX_INTERCEPT_TIME)
-end
-
 local function PredictPositionSilent(character, hitbox)
 	if not hitbox then return nil end
 	local useResolver = Silent.Resolver
 	local jumpOffset = Silent.JumpOffset
-	local useInterceptModel = Silent.UseInterceptModel
-	local projectileSpeed = Silent.ProjectileSpeed or PROJECTILE_SPEED
 	local velocity, acceleration = GetSmoothedVelocity(character, useResolver)
 	local myChar = LocalPlayer.Character
 	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
@@ -441,22 +356,16 @@ local function PredictPositionSilent(character, hitbox)
 		local t_net = (ping / 1000) / 2
 		return hitbox.Position + velocity * t_net
 	end
-	local shooterPos = myRoot.Position + Vector3.new(0, 2, 0)
 	local targetPos = hitbox.Position
 	local ping = GetPing()
 	local t_net = (ping / 1000) / 2
 	local t_tick = SERVER_TICK_INTERVAL / 2
 	local t_proj
-	if useInterceptModel and projectileSpeed > 0 then
-		t_proj = CalculateInterceptTime(targetPos, velocity, shooterPos, projectileSpeed)
+	if Silent.AutoPrediction then
+		local divisor = Silent.AutoPredictionDivisor or 250
+		t_proj = PREDICTION_BASE + (ping / divisor) * 0.1
 	else
-		if Silent.AutoPrediction then
-			local divisor = Silent.AutoPredictionDivisor or 250
-			t_proj = PREDICTION_BASE + (ping / divisor) * 0.1
-		else
-			local distance = (targetPos - shooterPos).Magnitude
-			t_proj = distance / math.max(projectileSpeed, 1)
-		end
+		t_proj = PREDICTION_BASE
 	end
 	local t = t_net + t_tick + t_proj
 	local yOffset = GetJumpOffset(character, jumpOffset)
@@ -519,11 +428,34 @@ local function GetEquippedGun()
 	return tool
 end
 
+local function IsMeleeWeapon(gun)
+	if not gun then return false end
+	local gunName = gun.Name:upper()
+	return MELEE_WEAPONS[gunName] == true
+end
+
+local function CanHoldFire(gun)
+	if not gun then return false end
+	local gunName = gun.Name:upper()
+	return NO_HOLD_FIRE_WEAPONS[gunName] ~= true
+end
+
+local function IsNoSilentWeapon(gun)
+	if not gun then return false end
+	local gunName = gun.Name:upper()
+	return NO_SILENT_WEAPONS[gunName] == true
+end
+
+
 local function CanShootSilent()
 	local char, hum = GetCharacterParts()
 	if not char or not hum then return false, nil end
 	local gun = GetEquippedGun()
 	if not gun then return false, nil end
+	-- Ближнее оружие не работает с сайлентом
+	if IsMeleeWeapon(gun) then return false, nil end
+	-- Определенные оружия не работают с сайлентом вообще
+	if IsNoSilentWeapon(gun) then return false, nil end
 	local ammo = gun:FindFirstChild("Ammo")
 	if ammo and ammo.Value <= 0 then return false, nil end
 	local bodyEffects = char:FindFirstChild("BodyEffects")
@@ -531,6 +463,7 @@ local function CanShootSilent()
 	if bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then return false, nil end
 	if bodyEffects:FindFirstChild("Dead") and bodyEffects.Dead.Value then return false, nil end
 	if bodyEffects:FindFirstChild("Reload") and bodyEffects.Reload.Value then return false, nil end
+	-- Проверка кулдауна происходит через ShootingCooldown в функциях стрельбы
 	return true, gun
 end
 
@@ -582,30 +515,9 @@ local function FireModifiedShot(target)
 		gunRemote:FireServer("Shoot")
 	end
 	MainEvent:FireServer("ShootGun", gun.Handle, startPos, targetPos, hitbox, Vector3.new(0, 1, 0))
-	local shootSound = gun.Handle:FindFirstChild("Fire") or gun.Handle:FindFirstChild("ShootSound")
-	if shootSound and shootSound:IsA("Sound") then
-		shootSound:Play()
-	end
 	return true
 end
 
-local function FireNormalShot()
-	local canShootResult, gun = CanShootSilent()
-	if not canShootResult or not gun then return false end
-	local char = LocalPlayer.Character
-	local myHRP = char:FindFirstChild("HumanoidRootPart")
-	if not myHRP then return false end
-	local mouse = LocalPlayer:GetMouse()
-	local targetPos = mouse.Hit.Position
-	local startPos = myHRP.Position + Vector3.new(0, 2, 0)
-	MainEvent:FireServer("UpdateMousePosI2", targetPos)
-	local gunRemote = gun:FindFirstChild("RemoteEvent")
-	if gunRemote then
-		gunRemote:FireServer("Shoot")
-	end
-	MainEvent:FireServer("ShootGun", gun.Handle, startPos, targetPos, mouse.Target or workspace.Terrain, mouse.TargetSurface and Vector3.FromNormalId(mouse.TargetSurface) or Vector3.new(0, 1, 0))
-	return true
-end
 
 local function BlockGunInput(gun)
 	if not gun then return end
@@ -639,6 +551,31 @@ local function UnblockGunInput()
 	Silent.BlockedConnections = {}
 end
 
+local function StartSpeedFix()
+	if silentSpeedFixConnection then return end
+	-- Сохраняем текущую скорость
+	local char, hum = GetCharacterParts()
+	if hum then
+		savedWalkSpeed = hum.WalkSpeed
+	end
+	silentSpeedFixConnection = RunService.Heartbeat:Connect(function()
+		if not Silent.Active then return end
+		local character, humanoid = GetCharacterParts()
+		if not humanoid then return end
+		-- Если скорость упала ниже сохраненной - восстанавливаем
+		if humanoid.WalkSpeed < savedWalkSpeed and not walkSpeedEnabled then
+			humanoid.WalkSpeed = savedWalkSpeed
+		end
+	end)
+end
+
+local function StopSpeedFix()
+	if silentSpeedFixConnection then
+		silentSpeedFixConnection:Disconnect()
+		silentSpeedFixConnection = nil
+	end
+end
+
 local function OnSilentInputBegan(input, gameProcessed)
 	if gameProcessed then return end
 	if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
@@ -646,12 +583,12 @@ local function OnSilentInputBegan(input, gameProcessed)
 	isMouseHeld = true
 	local gun = GetEquippedGun()
 	if not gun then return end
+	-- Стреляем только если есть цель
 	local target = GetTarget(Silent.FOV, true, true)
 	if target then
 		FireModifiedShot(target)
-	else
-		FireNormalShot()
 	end
+	-- Если нет цели - ничего не делаем, игрок стреляет сам через оригинальный скрипт
 end
 
 local function OnSilentInputEnded(input)
@@ -665,14 +602,19 @@ local function OnSilentHoldUpdate()
 	if not isMouseHeld then return end
 	local gun = GetEquippedGun()
 	if not gun then return end
+	
+	-- Проверяем, можно ли зажимать на этом оружии
+	if not CanHoldFire(gun) then return end
+	
 	local canShootResult = CanShootSilent()
 	if not canShootResult then return end
+	
+	-- Стреляем только если есть цель
 	local target = GetTarget(Silent.FOV, true, true)
 	if target then
 		FireModifiedShot(target)
-	else
-		FireNormalShot()
 	end
+	-- Если нет цели - ничего не делаем
 end
 
 local function OnSilentRenderStep()
@@ -700,6 +642,7 @@ local function EnableSilent()
 	Silent.InputEndConnection = UserInputService.InputEnded:Connect(OnSilentInputEnded)
 	Silent.RenderConnection = RunService.RenderStepped:Connect(OnSilentRenderStep)
 	silentHoldConnection = RunService.Heartbeat:Connect(OnSilentHoldUpdate)
+	StartSpeedFix()
 end
 
 local function DisableSilent()
@@ -708,6 +651,7 @@ local function DisableSilent()
 	Silent.CurrentTarget = nil
 	isMouseHeld = false
 	UnblockGunInput()
+	StopSpeedFix()
 	if Silent.CharacterConnection then
 		Silent.CharacterConnection:Disconnect()
 		Silent.CharacterConnection = nil
@@ -1142,7 +1086,6 @@ local function onCharacterAdded(character)
 	smoothedVelocities = {}
 	lastUpdateTimes = {}
 	accelerationCache = {}
-	lastTargetHealth = {}
 	local humanoid = character:WaitForChild("Humanoid", 10)
 	if not humanoid then
 		isResetting = false
@@ -1263,49 +1206,6 @@ GlobalSection:AddDropdown({
 	Flag = "Hitbox"
 })
 
-GlobalSection:AddToggle({
-	Name = "Hit Sound",
-	Default = false,
-	Callback = function(v)
-		HitSound.Enabled = v
-		if v then
-			startHitSoundMonitor()
-		else
-			stopHitSoundMonitor()
-		end
-	end,
-	Flag = "HitSoundEnabled"
-})
-
-local HitSoundOptions = {}
-for name, _ in pairs(HitSound.Sounds) do
-	table.insert(HitSoundOptions, name)
-end
-table.sort(HitSoundOptions)
-
-GlobalSection:AddDropdown({
-	Name = "Sound Type",
-	Values = HitSoundOptions,
-	Default = "Bubble",
-	Callback = function(v)
-		HitSound.SelectedSound = v
-	end,
-	Flag = "HitSoundType"
-})
-
-GlobalSection:AddSlider({
-	Name = "Sound Volume",
-	Type = "",
-	Default = 1,
-	Min = 0.1,
-	Max = 5,
-	Round = 1,
-	Callback = function(v)
-		HitSound.Volume = v
-	end,
-	Flag = "HitSoundVolume"
-})
-
 local CameraLockSection = Legit:AddSection({ Name = "Camera Lock", Side = "left", ShowTitle = true, Height = 0 })
 
 local CameraLockToggle = CameraLockSection:AddToggle({
@@ -1400,24 +1300,6 @@ SilentSection:AddSlider({
 	Round = 0,
 	Callback = function(v) Silent.FOV = v end,
 	Flag = "SilentFOV"
-})
-
-SilentSection:AddToggle({
-	Name = "Intercept Model",
-	Default = true,
-	Callback = function(v) Silent.UseInterceptModel = v end,
-	Flag = "SilentInterceptModel"
-})
-
-SilentSection:AddSlider({
-	Name = "Projectile Speed",
-	Type = "u/s",
-	Default = 1000,
-	Min = 100,
-	Max = 5000,
-	Round = 0,
-	Callback = function(v) Silent.ProjectileSpeed = v end,
-	Flag = "SilentProjectileSpeed"
 })
 
 SilentSection:AddSlider({

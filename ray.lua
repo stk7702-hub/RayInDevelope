@@ -13,6 +13,71 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 local MainEvent = ReplicatedStorage:WaitForChild("MainEvent")
 
+local Constants = {
+	DEFAULT_FOV = 100,
+	DEFAULT_SMOOTHNESS = 0.1,
+	DEFAULT_PREDICTION = 0.1,
+	DEFAULT_TAU = 0.15,
+	DEFAULT_AUTO_PRED_DIVISOR = 250,
+	DEFAULT_WALK_SPEED = 16,
+	DEFAULT_JUMP_POWER = 50,
+	
+	PREDICTION_BASE = 0.095,
+	SERVER_TICK_INTERVAL = 1/60,
+	VELOCITY_MAX_MAGNITUDE = 150,
+	JUMP_STATE_OFFSET_MULTIPLIER = 1.0,
+	
+	FLY_MIN_SPEED = 0.5,
+	FLY_MAX_SPEED = 5,
+	CFRAME_MIN_SPEED = 0.1,
+	CFRAME_MAX_SPEED = 2,
+	
+	TRIGGER_MIN_DELAY = 0.05,
+	MAX_CHAT_MESSAGES = 100,
+	
+	MOUSE_POS_EVENTS = {
+		"UpdateMousePosI",
+		"UpdateMousePosI2",
+		"MousePosUpdate",
+		"MousePos",
+		"UpdateMousePos"
+	}
+}
+
+local WeaponLists = {
+	NO_SILENT = {
+		["GRENADE"] = true,
+		["RPG"] = true,
+		["FLAMETHROWER"] = true,
+	},
+	MELEE = {
+		["PITCHFORK"] = true,
+		["KNIFE"] = true,
+		["BAT"] = true,
+		["STOP SIGN"] = true,
+		["SHOVEL"] = true,
+		["SLEDGEHAMMER"] = true,
+		["KICKBOXING"] = true,
+		["BOXING"] = true,
+	},
+	FIRE_RATES = {
+		["GLOCK"] = 0.15,
+		["SILENCER"] = 0.15,
+		["DOUBLE BARREL"] = 0.8,
+		["SHOTGUN"] = 0.6,
+		["TACTICAL SHOTGUN"] = 0.4,
+		["REVOLVER"] = 0.5,
+		["AUG"] = 0.1,
+		["AK47"] = 0.1,
+		["AR"] = 0.1,
+		["SMG"] = 0.08,
+		["UZI"] = 0.07,
+		["TEC9"] = 0.07,
+		["LMG"] = 0.09,
+		["RIFLE"] = 0.12,
+	}
+}
+
 local customTheme = {
 	Accent = Color3.fromRGB(255, 255, 255),
 	Background = Color3.fromRGB(0, 0, 0),
@@ -63,9 +128,9 @@ local Aimbot = {
 local CameraLock = {
 	Enabled = false,
 	Active = false,
-	FOV = 100,
-	Smoothness = 0.1,
-	Prediction = 0.1,
+	FOV = Constants.DEFAULT_FOV,
+	Smoothness = Constants.DEFAULT_SMOOTHNESS,
+	Prediction = Constants.DEFAULT_PREDICTION,
 	CurrentTarget = nil,
 	Connection = nil,
 }
@@ -73,18 +138,13 @@ local CameraLock = {
 local Silent = {
 	Enabled = false,
 	Active = false,
-	FOV = 100,
+	FOV = Constants.DEFAULT_FOV,
 	CurrentTarget = nil,
-	BlockedConnections = {},
-	InputConnection = nil,
-	InputEndConnection = nil,
-	RenderConnection = nil,
-	CharacterConnection = nil,
 	Resolver = false,
 	JumpOffset = 0,
 	AutoPrediction = false,
-	AutoPredictionDivisor = 250,
-	Tau = 0.15,
+	AutoPredictionDivisor = Constants.DEFAULT_AUTO_PRED_DIVISOR,
+	Tau = Constants.DEFAULT_TAU,
 }
 
 local Trigger = {
@@ -92,36 +152,25 @@ local Trigger = {
 	Active = false,
 	Connection = nil,
 	LastShot = 0,
-	Delay = 0.05,
-	MinDelay = 0.05,
-	LastTarget = nil,
-	HasShotTarget = false,
-	LastGun = nil,
+	Delay = Constants.TRIGGER_MIN_DELAY,
+	MinDelay = Constants.TRIGGER_MIN_DELAY,
 }
-
-local PREDICTION_BASE = 0.095
-local PREDICTION_TAU = 0.15
-local SERVER_TICK_INTERVAL = 1/60
-local VELOCITY_SMOOTH_ALPHA = 0.4
-local VELOCITY_MAX_MAGNITUDE = 150
-local JUMP_STATE_OFFSET_MULTIPLIER = 1.0
-
-local previousPositions = {}
-local smoothedVelocities = {}
-local lastUpdateTimes = {}
-local accelerationCache = {}
 
 local ESP = {
 	ShowCameraLockFOV = true,
 	ShowSilentFOV = true,
-	ShowTriggerFOV = true,
 	CameraLockFOVColor = Color3.fromRGB(255, 255, 255),
 	SilentFOVColor = Color3.fromRGB(0, 255, 255),
-	TriggerFOVColor = Color3.fromRGB(255, 165, 0),
 	LockedColor = Color3.fromRGB(255, 70, 70),
 	CameraLockCircle = nil,
 	SilentCircle = nil,
-	TriggerCircle = nil,
+}
+
+local VelocityCache = {
+	previousPositions = {},
+	smoothedVelocities = {},
+	lastUpdateTimes = {},
+	accelerationCache = {}
 }
 
 local movementKeys = {w = false, a = false, s = false, d = false}
@@ -139,42 +188,10 @@ local cframeSpeedValue = 1
 local cframeSpeedConnection = nil
 local cframeSpeedActive = false
 
-local isMouseHeld = false
-local silentHoldConnection = nil
-local silentSpeedFixConnection = nil
-local savedWalkSpeed = 16
-
-local NO_HOLD_FIRE_WEAPONS = {
-	["GLOCK"] = true,
-	["SILENCER"] = true,
-	["DOUBLE BARREL"] = true,
-	["SHOTGUN"] = true,
-	["TACTICAL SHOTGUN"] = true,
-	["REVOLVER"] = true,
-	["AUG"] = true,
-}
-
-local NO_SILENT_WEAPONS = {
-	["GRENADE"] = true,
-	["RPG"] = true,
-	["FLAMETHROWER"] = true,
-}
-
-local MELEE_WEAPONS = {
-	["PITCHFORK"] = true,
-	["KNIFE"] = true,
-	["BAT"] = true,
-	["STOP SIGN"] = true,
-	["SHOVEL"] = true,
-	["SLEDGEHAMMER"] = true,
-	["KICKBOXING"] = true,
-	["BOXING"] = true,
-}
-
 local walkSpeedEnabled = false
 local jumpPowerEnabled = false
-local customWalkSpeed = 16
-local customJumpPower = 50
+local customWalkSpeed = Constants.DEFAULT_WALK_SPEED
+local customJumpPower = Constants.DEFAULT_JUMP_POWER
 local walkSpeedConnection = nil
 local jumpPowerConnection = nil
 
@@ -202,33 +219,19 @@ local chatSpyUI = nil
 local chatSpyFrame = nil
 local chatSpyScrollFrame = nil
 local chatSpyMessages = {}
-local maxChatSpyMessages = 100
 local chatSpyMinimized = false
 local spyOnMyself = false
 
 local UIElements = {}
 
-local FLY_MIN_SPEED = 0.5
-local FLY_MAX_SPEED = 5
-local CFRAME_MIN_SPEED = 0.1
-local CFRAME_MAX_SPEED = 2
+local originalNamecall = nil
 
 local function calculateFlySpeed(sliderValue)
-	return FLY_MIN_SPEED + (sliderValue / 100) * (FLY_MAX_SPEED - FLY_MIN_SPEED)
+	return Constants.FLY_MIN_SPEED + (sliderValue / 100) * (Constants.FLY_MAX_SPEED - Constants.FLY_MIN_SPEED)
 end
 
 local function calculateCFrameSpeed(sliderValue)
-	return CFRAME_MIN_SPEED + (sliderValue / 100) * (CFRAME_MAX_SPEED - CFRAME_MIN_SPEED)
-end
-
-local function getCurrentTarget()
-	if CameraLock.Active and CameraLock.CurrentTarget then
-		return CameraLock.CurrentTarget
-	end
-	if Silent.Active and Silent.CurrentTarget then
-		return Silent.CurrentTarget
-	end
-	return nil
+	return Constants.CFRAME_MIN_SPEED + (sliderValue / 100) * (Constants.CFRAME_MAX_SPEED - Constants.CFRAME_MIN_SPEED)
 end
 
 local function GetCharacterParts(player)
@@ -309,8 +312,7 @@ local function GetHitboxPart(character, hitboxName)
 end
 
 local function GetPing()
-	local ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
-	return ping
+	return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
 end
 
 local function CalculateSmoothAlpha(deltaTime, tau)
@@ -322,43 +324,49 @@ local function GetSmoothedVelocity(character, useResolver)
 	if not rootPart then return Vector3.zero, Vector3.zero end
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local player = Players:GetPlayerFromCharacter(character)
-	local tau = Silent.Tau or PREDICTION_TAU
+	local tau = Silent.Tau
 	if useResolver and humanoid then
 		local moveDir = humanoid.MoveDirection
 		local walkSpeed = humanoid.WalkSpeed
+		local realVelocity = rootPart.AssemblyLinearVelocity
+		
 		if moveDir.Magnitude > 0 then
-			return moveDir * walkSpeed, Vector3.zero
+			-- Комбинируем горизонтальную скорость из резольвера с вертикальной из реальной физики
+			local horizontalVel = moveDir * walkSpeed
+			local combinedVel = Vector3.new(horizontalVel.X, realVelocity.Y, horizontalVel.Z)
+			return combinedVel, Vector3.zero
 		end
-		return Vector3.zero, Vector3.zero
+		-- Если нет движения по горизонтали, возвращаем только вертикальную скорость
+		return Vector3.new(0, realVelocity.Y, 0), Vector3.zero
 	end
 	if not player then 
 		local velocity = rootPart.AssemblyLinearVelocity
-		if velocity.Magnitude > VELOCITY_MAX_MAGNITUDE then
-			velocity = velocity.Unit * VELOCITY_MAX_MAGNITUDE
+		if velocity.Magnitude > Constants.VELOCITY_MAX_MAGNITUDE then
+			velocity = velocity.Unit * Constants.VELOCITY_MAX_MAGNITUDE
 		end
 		return velocity, Vector3.zero
 	end
 	local currentTime = tick()
 	local currentPos = rootPart.Position
-	local lastPos = previousPositions[player] or currentPos
-	local lastTime = lastUpdateTimes[player] or (currentTime - 0.016)
+	local lastPos = VelocityCache.previousPositions[player] or currentPos
+	local lastTime = VelocityCache.lastUpdateTimes[player] or (currentTime - 0.016)
 	local deltaTime = math.max(currentTime - lastTime, 0.001)
 	local rawVelocity = (currentPos - lastPos) / deltaTime
-	if rawVelocity.Magnitude > VELOCITY_MAX_MAGNITUDE then
-		rawVelocity = rawVelocity.Unit * VELOCITY_MAX_MAGNITUDE
+	if rawVelocity.Magnitude > Constants.VELOCITY_MAX_MAGNITUDE then
+		rawVelocity = rawVelocity.Unit * Constants.VELOCITY_MAX_MAGNITUDE
 	end
 	local alpha = CalculateSmoothAlpha(deltaTime, tau)
-	local prevSmoothed = smoothedVelocities[player] or rawVelocity
+	local prevSmoothed = VelocityCache.smoothedVelocities[player] or rawVelocity
 	local smoothed = prevSmoothed:Lerp(rawVelocity, alpha)
-	local prevVelocity = smoothedVelocities[player] or smoothed
+	local prevVelocity = VelocityCache.smoothedVelocities[player] or smoothed
 	local rawAccel = (smoothed - prevVelocity) / deltaTime
-	local prevAccel = accelerationCache[player] or rawAccel
+	local prevAccel = VelocityCache.accelerationCache[player] or rawAccel
 	local accelAlpha = CalculateSmoothAlpha(deltaTime, tau * 2)
 	local smoothedAccel = prevAccel:Lerp(rawAccel, accelAlpha)
-	accelerationCache[player] = smoothedAccel
-	smoothedVelocities[player] = smoothed
-	previousPositions[player] = currentPos
-	lastUpdateTimes[player] = currentTime
+	VelocityCache.accelerationCache[player] = smoothedAccel
+	VelocityCache.smoothedVelocities[player] = smoothed
+	VelocityCache.previousPositions[player] = currentPos
+	VelocityCache.lastUpdateTimes[player] = currentTime
 	return smoothed, smoothedAccel
 end
 
@@ -368,33 +376,24 @@ local function GetJumpOffset(character, baseOffset)
 	if not humanoid then return 0 end
 	local state = humanoid:GetState()
 	if state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping then
-		return baseOffset * JUMP_STATE_OFFSET_MULTIPLIER
+		return baseOffset * Constants.JUMP_STATE_OFFSET_MULTIPLIER
 	end
 	return 0
 end
 
-local function PredictPositionSilent(character, hitbox)
+local function PredictPosition(character, hitbox, useResolver, jumpOffset, autoPrediction, autoPredDivisor, tau)
 	if not hitbox then return nil end
-	local useResolver = Silent.Resolver
-	local jumpOffset = Silent.JumpOffset
 	local velocity, acceleration = GetSmoothedVelocity(character, useResolver)
-	local myChar = LocalPlayer.Character
-	local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-	if not myRoot then
-		local ping = GetPing()
-		local t_net = (ping / 1000) / 2
-		return hitbox.Position + velocity * t_net
-	end
 	local targetPos = hitbox.Position
 	local ping = GetPing()
 	local t_net = (ping / 1000) / 2
-	local t_tick = SERVER_TICK_INTERVAL / 2
+	local t_tick = Constants.SERVER_TICK_INTERVAL / 2
 	local t_proj
-	if Silent.AutoPrediction then
-		local divisor = Silent.AutoPredictionDivisor or 250
-		t_proj = PREDICTION_BASE + (ping / divisor) * 0.1
+	if autoPrediction then
+		local divisor = autoPredDivisor
+		t_proj = Constants.PREDICTION_BASE + (ping / divisor) * 0.1
 	else
-		t_proj = PREDICTION_BASE
+		t_proj = Constants.PREDICTION_BASE
 	end
 	local t = t_net + t_tick + t_proj
 	local yOffset = GetJumpOffset(character, jumpOffset)
@@ -402,7 +401,7 @@ local function PredictPositionSilent(character, hitbox)
 	return predictedPos
 end
 
-local function PredictPosition(character, hitbox, prediction)
+local function PredictPositionCamera(character, hitbox, prediction)
 	if not hitbox then return nil end
 	if prediction <= 0 then return hitbox.Position end
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
@@ -427,7 +426,7 @@ local function IsCharacterAlive(character)
 	return true
 end
 
-local function GetTarget(fov, useVisibleCheck, forSilent)
+local function GetTarget(fov, useVisibleCheck)
 	if not Aimbot.Enabled then return nil end
 	local myChar, myHum, myRoot = GetCharacterParts()
 	if not myRoot then return nil end
@@ -436,19 +435,12 @@ local function GetTarget(fov, useVisibleCheck, forSilent)
 		if player == LocalPlayer then continue end
 		local char, hum = GetCharacterParts(player)
 		if not char or not hum then continue end
-		local bodyEffects = char:FindFirstChild("BodyEffects")
-		if bodyEffects then
-			local ko = bodyEffects:FindFirstChild("K.O")
-			if ko and ko.Value then continue end
-			local dead = bodyEffects:FindFirstChild("Dead")
-			if dead and dead.Value then continue end
-		end
+		if not IsCharacterAlive(char) then continue end
 		local hitbox = GetHitboxPart(char, Aimbot.Hitbox)
 		if not hitbox then continue end
 		local crosshairDist = GetDistanceFromCrosshair(hitbox.Position)
 		if crosshairDist > fov then continue end
-		local checkVisible = useVisibleCheck or forSilent
-		if checkVisible then
+		if useVisibleCheck then
 			if not IsVisible(Camera.CFrame.Position, hitbox) then continue end
 		end
 		local worldDist = GetWorldDistance(myRoot.Position, hitbox.Position)
@@ -474,23 +466,15 @@ end
 
 local function IsMeleeWeapon(gun)
 	if not gun then return false end
-	local gunName = gun.Name:upper()
-	return MELEE_WEAPONS[gunName] == true
-end
-
-local function CanHoldFire(gun)
-	if not gun then return false end
-	local gunName = gun.Name:upper()
-	return NO_HOLD_FIRE_WEAPONS[gunName] ~= true
+	return WeaponLists.MELEE[gun.Name:upper()] == true
 end
 
 local function IsNoSilentWeapon(gun)
 	if not gun then return false end
-	local gunName = gun.Name:upper()
-	return NO_SILENT_WEAPONS[gunName] == true
+	return WeaponLists.NO_SILENT[gun.Name:upper()] == true
 end
 
-local function CanShootSilent()
+local function CanShoot()
 	local char, hum = GetCharacterParts()
 	if not char or not hum then return false, nil end
 	local gun = GetEquippedGun()
@@ -504,22 +488,7 @@ local function CanShootSilent()
 	if bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then return false, nil end
 	if bodyEffects:FindFirstChild("Dead") and bodyEffects.Dead.Value then return false, nil end
 	if bodyEffects:FindFirstChild("Reload") and bodyEffects.Reload.Value then return false, nil end
-	return true, gun
-end
-
-local function CanShoot()
-	local char, hum = GetCharacterParts()
-	if not char or not hum then return false, nil end
-	local gun = GetEquippedGun()
-	if not gun then return false, nil end
-	local ammo = gun:FindFirstChild("Ammo")
-	if ammo and ammo.Value <= 0 then return false, nil end
-	local bodyEffects = char:FindFirstChild("BodyEffects")
-	if not bodyEffects then return false, nil end
 	if bodyEffects:FindFirstChild("Cuff") and bodyEffects.Cuff.Value then return false, nil end
-	if bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then return false, nil end
-	if bodyEffects:FindFirstChild("Reload") and bodyEffects.Reload.Value then return false, nil end
-	if bodyEffects:FindFirstChild("Dead") and bodyEffects.Dead.Value then return false, nil end
 	if bodyEffects:FindFirstChild("Attacking") and bodyEffects.Attacking.Value then return false, nil end
 	if bodyEffects:FindFirstChild("Grabbed") and bodyEffects.Grabbed.Value then return false, nil end
 	if gun:GetAttribute("Cooldown") then return false, nil end
@@ -529,216 +498,60 @@ local function CanShoot()
 	return true, gun
 end
 
-local function FireModifiedShot(target)
-	local canShootResult, gun = CanShootSilent()
-	if not canShootResult or not gun then return false end
-	local char = LocalPlayer.Character
-	local myHRP = char:FindFirstChild("HumanoidRootPart")
-	if not myHRP then return false end
-	local targetChar = target.Character
-	if not targetChar then return false end
+local function GetPredictedTargetPosition()
+	if not Silent.Active or not Silent.CurrentTarget then return nil end
+	local targetChar = Silent.CurrentTarget.Character
+	if not targetChar or not IsCharacterAlive(targetChar) then return nil end
 	local hitbox = GetHitboxPart(targetChar, Aimbot.Hitbox)
-	if not hitbox then return false end
-	local targetPos = PredictPositionSilent(targetChar, hitbox)
-	if not targetPos then return false end
-	local startPos = myHRP.Position + Vector3.new(0, 2, 0)
-	local gunRange = gun:FindFirstChild("Range")
-	if gunRange then
-		local distance = (targetPos - startPos).Magnitude
-		if distance > gunRange.Value then
-			return false
-		end
-	end
-	MainEvent:FireServer("UpdateMousePosI2", targetPos)
-	local gunRemote = gun:FindFirstChild("RemoteEvent")
-	if gunRemote then
-		gunRemote:FireServer("Shoot")
-	end
-	MainEvent:FireServer("ShootGun", gun.Handle, startPos, targetPos, hitbox, Vector3.new(0, 1, 0))
-	return true
+	if not hitbox then return nil end
+	return PredictPosition(
+		targetChar, 
+		hitbox, 
+		Silent.Resolver, 
+		Silent.JumpOffset, 
+		Silent.AutoPrediction, 
+		Silent.AutoPredictionDivisor, 
+		Silent.Tau
+	)
 end
 
-local function BlockGunInput(gun)
-	if not gun then return end
-	local localScript = gun:FindFirstChild("LocalScript")
-	if localScript and localScript:IsA("LocalScript") then
-		localScript.Disabled = true
-		table.insert(Silent.BlockedConnections, {script = localScript, wasDisabled = false})
+local function IsMousePosEvent(eventName)
+	for _, name in ipairs(Constants.MOUSE_POS_EVENTS) do
+		if eventName == name then return true end
 	end
-	if getconnections then
-		local success, connections = pcall(function()
-			return getconnections(gun.Activated)
-		end)
-		if success and connections then
-			for _, conn in ipairs(connections) do
-				pcall(function() conn:Disable() end)
-				table.insert(Silent.BlockedConnections, {connection = conn})
+	return false
+end
+
+local function SetupMetahook()
+	if originalNamecall then return end
+	originalNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+		local args = {...}
+		local method = getnamecallmethod()
+		if method == "FireServer" and Silent.Active and Silent.CurrentTarget then
+			if self == MainEvent or (self.Name == "MainEvent" and self:IsA("RemoteEvent")) then
+				if type(args[1]) == "string" and IsMousePosEvent(args[1]) then
+					local predictedPos = GetPredictedTargetPosition()
+					if predictedPos then
+						args[2] = predictedPos
+						return originalNamecall(self, unpack(args))
+					end
+				end
 			end
 		end
-	end
-end
-
-local function UnblockGunInput()
-	for _, data in ipairs(Silent.BlockedConnections) do
-		if data.script then
-			data.script.Disabled = data.wasDisabled or false
-		end
-		if data.connection then
-			pcall(function() data.connection:Enable() end)
-		end
-	end
-	Silent.BlockedConnections = {}
-end
-
-local function StartSpeedFix()
-	if silentSpeedFixConnection then return end
-	local char, hum = GetCharacterParts()
-	if hum then
-		savedWalkSpeed = hum.WalkSpeed
-	end
-	silentSpeedFixConnection = RunService.Heartbeat:Connect(function()
-		if not Silent.Active then return end
-		local character, humanoid = GetCharacterParts()
-		if not humanoid then return end
-		if humanoid.WalkSpeed < savedWalkSpeed and not walkSpeedEnabled then
-			humanoid.WalkSpeed = savedWalkSpeed
-		end
+		return originalNamecall(self, ...)
 	end)
-end
-
-local function StopSpeedFix()
-	if silentSpeedFixConnection then
-		silentSpeedFixConnection:Disconnect()
-		silentSpeedFixConnection = nil
-	end
-end
-
-local function OnSilentInputBegan(input, gameProcessed)
-	if gameProcessed then return end
-	if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-	if not Silent.Active then return end
-	isMouseHeld = true
-	local gun = GetEquippedGun()
-	if not gun then return end
-	local target = GetTarget(Silent.FOV, true, true)
-	if target then
-		FireModifiedShot(target)
-	end
-end
-
-local function OnSilentInputEnded(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		isMouseHeld = false
-	end
-end
-
-local function OnSilentHoldUpdate()
-	if not Silent.Active then return end
-	if not isMouseHeld then return end
-	local gun = GetEquippedGun()
-	if not gun then return end
-	if not CanHoldFire(gun) then return end
-	local canShootResult = CanShootSilent()
-	if not canShootResult then return end
-	local target = GetTarget(Silent.FOV, true, true)
-	if target then
-		FireModifiedShot(target)
-	end
-end
-
-local function OnSilentRenderStep()
-	if not Silent.Active then return end
-	Silent.CurrentTarget = GetTarget(Silent.FOV, true, true)
 end
 
 local function EnableSilent()
 	if Silent.Active then return end
 	Silent.Active = true
-	isMouseHeld = false
-	local gun = GetEquippedGun()
-	if gun then
-		BlockGunInput(gun)
-	end
-	if LocalPlayer.Character then
-		Silent.CharacterConnection = LocalPlayer.Character.ChildAdded:Connect(function(child)
-			if child:IsA("Tool") and Silent.Active then
-				task.wait(0.1)
-				BlockGunInput(child)
-			end
-		end)
-	end
-	Silent.InputConnection = UserInputService.InputBegan:Connect(OnSilentInputBegan)
-	Silent.InputEndConnection = UserInputService.InputEnded:Connect(OnSilentInputEnded)
-	Silent.RenderConnection = RunService.RenderStepped:Connect(OnSilentRenderStep)
-	silentHoldConnection = RunService.Heartbeat:Connect(OnSilentHoldUpdate)
-	StartSpeedFix()
+	SetupMetahook()
 end
 
 local function DisableSilent()
 	if not Silent.Active then return end
 	Silent.Active = false
 	Silent.CurrentTarget = nil
-	isMouseHeld = false
-	UnblockGunInput()
-	StopSpeedFix()
-	if Silent.CharacterConnection then
-		Silent.CharacterConnection:Disconnect()
-		Silent.CharacterConnection = nil
-	end
-	if Silent.InputConnection then
-		Silent.InputConnection:Disconnect()
-		Silent.InputConnection = nil
-	end
-	if Silent.InputEndConnection then
-		Silent.InputEndConnection:Disconnect()
-		Silent.InputEndConnection = nil
-	end
-	if Silent.RenderConnection then
-		Silent.RenderConnection:Disconnect()
-		Silent.RenderConnection = nil
-	end
-	if silentHoldConnection then
-		silentHoldConnection:Disconnect()
-		silentHoldConnection = nil
-	end
-end
-
-local function GetTriggerTarget()
-	local myChar = LocalPlayer.Character
-	if not myChar then return nil end
-	
-	-- Если сайлент активен, используем его цель или его FOV логику
-	if Silent.Active then
-		-- Сначала проверяем, есть ли уже цель у сайлента
-		if Silent.CurrentTarget then
-			local targetChar = Silent.CurrentTarget.Character
-			if targetChar and IsCharacterAlive(targetChar) then
-				return Silent.CurrentTarget
-			end
-		end
-		-- Если нет, ищем через FOV сайлента
-		return GetTarget(Silent.FOV, true, true)
-	end
-	
-	-- Когда сайлент не активен - используем raycast под курсором
-	local mouse = LocalPlayer:GetMouse()
-	local ray = Camera:ScreenPointToRay(mouse.X, mouse.Y)
-	local raycastParams = RaycastParams.new()
-	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-	raycastParams.FilterDescendantsInstances = {myChar, Camera, workspace:FindFirstChild("Bush"), workspace:FindFirstChild("Ignored")}
-	local result = workspace:Raycast(ray.Origin, ray.Direction * 1000, raycastParams)
-	
-	if result and result.Instance then
-		local hit = result.Instance
-		local targetPlayer = Players:GetPlayerFromCharacter(hit.Parent) or Players:GetPlayerFromCharacter(hit.Parent.Parent)
-		if targetPlayer and targetPlayer ~= LocalPlayer then
-			local targetChar = targetPlayer.Character
-			if targetChar and IsCharacterAlive(targetChar) then
-				return targetPlayer
-			end
-		end
-	end
-	return nil
 end
 
 local function GetWeaponFireRate(gun)
@@ -747,138 +560,34 @@ local function GetWeaponFireRate(gun)
 	if fireRate and fireRate:IsA("NumberValue") then
 		return math.max(fireRate.Value, 0.05)
 	end
-	-- Дефолтные значения для известного оружия
-	local gunName = gun.Name:upper()
-	local defaultRates = {
-		["GLOCK"] = 0.15,
-		["SILENCER"] = 0.15,
-		["DOUBLE BARREL"] = 0.8,
-		["SHOTGUN"] = 0.6,
-		["TACTICAL SHOTGUN"] = 0.4,
-		["REVOLVER"] = 0.5,
-		["AUG"] = 0.1,
-		["AK47"] = 0.1,
-		["AR"] = 0.1,
-		["SMG"] = 0.08,
-		["UZI"] = 0.07,
-		["TEC9"] = 0.07,
-		["LMG"] = 0.09,
-		["RIFLE"] = 0.12,
-	}
-	return defaultRates[gunName] or 0.1
+	return WeaponLists.FIRE_RATES[gun.Name:upper()] or 0.1
 end
 
 local function TriggerShoot()
-	-- Проверка задержки между выстрелами
 	local currentTime = tick()
-	if currentTime - Trigger.LastShot < Trigger.Delay then
-		return
-	end
-	
-	local target = GetTriggerTarget()
-	
-	-- Получаем оружие в зависимости от состояния сайлента
-	local gun = nil
-	if Silent.Active then
-		local canShootResult, gunResult = CanShootSilent()
-		if not canShootResult or not gunResult then 
-			-- Если не можем стрелять, сбрасываем состояние если цель изменилась
-			if target ~= Trigger.LastTarget then
-				Trigger.HasShotTarget = false
-				Trigger.LastTarget = target
-			end
-			return 
-		end
-		gun = gunResult
-	else
-		local canShootResult, gunResult = CanShoot()
-		if not canShootResult or not gunResult then 
-			-- Если не можем стрелять, сбрасываем состояние если цель изменилась
-			if target ~= Trigger.LastTarget then
-				Trigger.HasShotTarget = false
-				Trigger.LastTarget = target
-			end
-			return 
-		end
-		gun = gunResult
-	end
-	
-	-- Сбрасываем флаг если цель сменилась или стала nil
-	if target ~= Trigger.LastTarget then
-		Trigger.HasShotTarget = false
-		Trigger.LastTarget = target
-	end
-	
-	-- Сбрасываем флаг если оружие сменилось
-	if gun ~= Trigger.LastGun then
-		Trigger.HasShotTarget = false
-		Trigger.LastGun = gun
-	end
-	
-	-- Если нет цели, выходим (состояние уже сброшено выше)
-	if not target then
-		return
-	end
-	
-	-- Для полуавтоматического оружия проверяем, не стреляли ли мы уже по этой цели
-	local isSemiAuto = not CanHoldFire(gun)
-	if isSemiAuto and Trigger.HasShotTarget and target == Trigger.LastTarget then
-		-- Уже стреляли по этой цели полуавтоматом, пропускаем
-		return
-	end
-	
-	-- Устанавливаем задержку на основе скорострельности оружия
+	if currentTime - Trigger.LastShot < Trigger.Delay then return end
+	local canShootResult, gun = CanShoot()
+	if not canShootResult or not gun then return end
+	local target = Silent.Active and Silent.CurrentTarget or GetTarget(Silent.FOV, true)
+	if not target then return end
+	local targetChar = target.Character
+	if not targetChar or not IsCharacterAlive(targetChar) then return end
 	local fireRate = GetWeaponFireRate(gun)
 	Trigger.Delay = math.max(fireRate + 0.02, Trigger.MinDelay)
-	
-	local shotSuccess = false
-	
-	if Silent.Active then
-		-- Когда сайлент активен, используем его логику выстрела
-		if FireModifiedShot(target) then
+	pcall(function()
+		if mouse1click then
+			mouse1click()
 			Trigger.LastShot = currentTime
-			shotSuccess = true
 		end
-	else
-		-- Когда сайлент не активен, используем обычный клик
-		pcall(function()
-			if mouse1click then
-				mouse1click()
-				Trigger.LastShot = currentTime
-				shotSuccess = true
-			end
-		end)
-	end
-	
-	-- После успешного выстрела обновляем состояние
-	if shotSuccess then
-		Trigger.LastTarget = target
-		Trigger.LastGun = gun
-		-- Для полуавтомата устанавливаем флаг, что уже стреляли по этой цели
-		if isSemiAuto then
-			Trigger.HasShotTarget = true
-		else
-			-- Для автоматического оружия сбрасываем флаг, чтобы стрелять непрерывно
-			Trigger.HasShotTarget = false
-		end
-	end
+	end)
 end
 
 local function StartTrigger()
 	if Trigger.Connection then return end
 	Trigger.LastShot = 0
-	-- Сбрасываем состояние при старте
-	Trigger.LastTarget = nil
-	Trigger.HasShotTarget = false
-	Trigger.LastGun = nil
-	
 	Trigger.Connection = RunService.RenderStepped:Connect(function()
 		if not Trigger.Active then return end
 		if menuOpen then return end
-		
-		-- Не стрелять если уже держим мышку (сайлент сам стреляет)
-		if Silent.Active and isMouseHeld then return end
-		
 		TriggerShoot()
 	end)
 end
@@ -888,23 +597,16 @@ local function StopTrigger()
 		Trigger.Connection:Disconnect()
 		Trigger.Connection = nil
 	end
-	-- Сбрасываем состояние триггербота
-	Trigger.LastTarget = nil
-	Trigger.HasShotTarget = false
-	Trigger.LastGun = nil
 end
 
 local function CalculateSmoothFactor(smoothness, deltaTime)
-	if smoothness <= 0.01 then
-		return 1
-	end
+	if smoothness <= 0.01 then return 1 end
 	local baseFactor = 1 - smoothness
 	local expFactor = baseFactor ^ 0.7
 	local targetDelta = 1 / 60
 	local deltaScale = deltaTime / targetDelta
 	local eased = expFactor * expFactor * (3 - 2 * expFactor)
-	local finalFactor = math.clamp(eased * deltaScale, 0.02, 1)
-	return finalFactor
+	return math.clamp(eased * deltaScale, 0.02, 1)
 end
 
 local lastCameraLockTime = tick()
@@ -921,12 +623,12 @@ local function StartCameraLock()
 		local currentTime = tick()
 		local deltaTime = math.clamp(currentTime - lastCameraLockTime, 0.001, 0.1)
 		lastCameraLockTime = currentTime
-		local target = GetTarget(CameraLock.FOV, Aimbot.VisibleCheck, false)
+		local target = GetTarget(CameraLock.FOV, Aimbot.VisibleCheck)
 		CameraLock.CurrentTarget = target
 		if not target or not target.Character then return end
 		local hitbox = GetHitboxPart(target.Character, Aimbot.Hitbox)
 		if not hitbox then return end
-		local targetPos = PredictPosition(target.Character, hitbox, CameraLock.Prediction)
+		local targetPos = PredictPositionCamera(target.Character, hitbox, CameraLock.Prediction)
 		if not targetPos then return end
 		local screenPos, onScreen = WorldToScreen(targetPos)
 		if not onScreen then return end
@@ -977,14 +679,6 @@ local function CreateFOVCircles()
 		ESP.SilentCircle.Visible = false
 		ESP.SilentCircle.Transparency = 0.7
 	end
-	if not ESP.TriggerCircle then
-		ESP.TriggerCircle = Drawing.new("Circle")
-		ESP.TriggerCircle.Thickness = 1
-		ESP.TriggerCircle.NumSides = 64
-		ESP.TriggerCircle.Filled = false
-		ESP.TriggerCircle.Visible = false
-		ESP.TriggerCircle.Transparency = 0.7
-	end
 end
 
 local function UpdateFOVCircles()
@@ -1002,32 +696,22 @@ local function UpdateFOVCircles()
 				isVisibleTarget = hitbox and IsVisible(Camera.CFrame.Position, hitbox)
 			end
 		end
-		if hasTarget and isVisibleTarget then
-			ESP.CameraLockCircle.Color = ESP.LockedColor
-		else
-			ESP.CameraLockCircle.Color = ESP.CameraLockFOVColor
-		end
+		ESP.CameraLockCircle.Color = (hasTarget and isVisibleTarget) and ESP.LockedColor or ESP.CameraLockFOVColor
 	end
 	if ESP.SilentCircle then
 		ESP.SilentCircle.Position = mousePos
 		ESP.SilentCircle.Radius = Silent.FOV
 		ESP.SilentCircle.Visible = ESP.ShowSilentFOV and Silent.Active
-		local hasTarget = Silent.CurrentTarget ~= nil
-		if hasTarget then
-			ESP.SilentCircle.Color = ESP.LockedColor
-		else
-			ESP.SilentCircle.Color = ESP.SilentFOVColor
-		end
-	end
-	if ESP.TriggerCircle then
-		-- Триггер работает через raycast или FOV сайлента
-		ESP.TriggerCircle.Visible = false
+		ESP.SilentCircle.Color = Silent.CurrentTarget and ESP.LockedColor or ESP.SilentFOVColor
 	end
 end
 
 CreateFOVCircles()
 
 RunService.RenderStepped:Connect(function()
+	if Silent.Active then
+		Silent.CurrentTarget = GetTarget(Silent.FOV, true)
+	end
 	pcall(UpdateFOVCircles)
 end)
 
@@ -1047,22 +731,18 @@ local function createChatSpyUI()
 	if chatSpyUI then
 		chatSpyUI:Destroy()
 	end
-	
 	local screenGui = Instance.new("ScreenGui")
 	screenGui.Name = "ChatSpyUI"
 	screenGui.ResetOnSpawn = false
 	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	screenGui.DisplayOrder = 999
-	
 	pcall(function()
 		screenGui.Parent = CoreGui
 	end)
 	if not screenGui.Parent then
 		screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 	end
-	
 	chatSpyUI = screenGui
-	
 	local mainFrame = Instance.new("Frame")
 	mainFrame.Name = "MainFrame"
 	mainFrame.Size = UDim2.new(0, 350, 0, 300)
@@ -1071,17 +751,14 @@ local function createChatSpyUI()
 	mainFrame.BorderSizePixel = 0
 	mainFrame.ClipsDescendants = true
 	mainFrame.Parent = screenGui
-	
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 8)
 	corner.Parent = mainFrame
-	
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = customTheme.Accent
 	stroke.Thickness = 1
 	stroke.Transparency = 0.5
 	stroke.Parent = mainFrame
-	
 	local shadow = Instance.new("ImageLabel")
 	shadow.Name = "Shadow"
 	shadow.Size = UDim2.new(1, 30, 1, 30)
@@ -1094,18 +771,15 @@ local function createChatSpyUI()
 	shadow.SliceCenter = Rect.new(49, 49, 450, 450)
 	shadow.ZIndex = -1
 	shadow.Parent = mainFrame
-	
 	local header = Instance.new("Frame")
 	header.Name = "Header"
 	header.Size = UDim2.new(1, 0, 0, 35)
 	header.BackgroundColor3 = customTheme.Header
 	header.BorderSizePixel = 0
 	header.Parent = mainFrame
-	
 	local headerCorner = Instance.new("UICorner")
 	headerCorner.CornerRadius = UDim.new(0, 8)
 	headerCorner.Parent = header
-	
 	local headerFix = Instance.new("Frame")
 	headerFix.Name = "HeaderFix"
 	headerFix.Size = UDim2.new(1, 0, 0, 10)
@@ -1113,7 +787,6 @@ local function createChatSpyUI()
 	headerFix.BackgroundColor3 = customTheme.Header
 	headerFix.BorderSizePixel = 0
 	headerFix.Parent = header
-	
 	local title = Instance.new("TextLabel")
 	title.Name = "Title"
 	title.Size = UDim2.new(1, -80, 1, 0)
@@ -1125,7 +798,6 @@ local function createChatSpyUI()
 	title.Font = Enum.Font.GothamBold
 	title.TextXAlignment = Enum.TextXAlignment.Left
 	title.Parent = header
-	
 	local statusDot = Instance.new("Frame")
 	statusDot.Name = "StatusDot"
 	statusDot.Size = UDim2.new(0, 8, 0, 8)
@@ -1133,11 +805,9 @@ local function createChatSpyUI()
 	statusDot.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
 	statusDot.BorderSizePixel = 0
 	statusDot.Parent = header
-	
 	local statusDotCorner = Instance.new("UICorner")
 	statusDotCorner.CornerRadius = UDim.new(1, 0)
 	statusDotCorner.Parent = statusDot
-	
 	local msgCount = Instance.new("TextLabel")
 	msgCount.Name = "MsgCount"
 	msgCount.Size = UDim2.new(0, 50, 1, 0)
@@ -1149,7 +819,6 @@ local function createChatSpyUI()
 	msgCount.Font = Enum.Font.Gotham
 	msgCount.TextXAlignment = Enum.TextXAlignment.Right
 	msgCount.Parent = header
-	
 	local minimizeBtn = Instance.new("TextButton")
 	minimizeBtn.Name = "MinimizeBtn"
 	minimizeBtn.Size = UDim2.new(0, 25, 0, 25)
@@ -1161,11 +830,9 @@ local function createChatSpyUI()
 	minimizeBtn.TextSize = 18
 	minimizeBtn.Font = Enum.Font.GothamBold
 	minimizeBtn.Parent = header
-	
 	local minimizeBtnCorner = Instance.new("UICorner")
 	minimizeBtnCorner.CornerRadius = UDim.new(0, 4)
 	minimizeBtnCorner.Parent = minimizeBtn
-	
 	local clearBtn = Instance.new("TextButton")
 	clearBtn.Name = "ClearBtn"
 	clearBtn.Size = UDim2.new(0, 25, 0, 25)
@@ -1177,11 +844,9 @@ local function createChatSpyUI()
 	clearBtn.TextSize = 12
 	clearBtn.Font = Enum.Font.Gotham
 	clearBtn.Parent = header
-	
 	local clearBtnCorner = Instance.new("UICorner")
 	clearBtnCorner.CornerRadius = UDim.new(0, 4)
 	clearBtnCorner.Parent = clearBtn
-	
 	local content = Instance.new("Frame")
 	content.Name = "Content"
 	content.Size = UDim2.new(1, -10, 1, -45)
@@ -1190,11 +855,9 @@ local function createChatSpyUI()
 	content.BorderSizePixel = 0
 	content.ClipsDescendants = true
 	content.Parent = mainFrame
-	
 	local contentCorner = Instance.new("UICorner")
 	contentCorner.CornerRadius = UDim.new(0, 6)
 	contentCorner.Parent = content
-	
 	local scrollFrame = Instance.new("ScrollingFrame")
 	scrollFrame.Name = "ScrollFrame"
 	scrollFrame.Size = UDim2.new(1, -6, 1, -6)
@@ -1207,26 +870,21 @@ local function createChatSpyUI()
 	scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
 	scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
 	scrollFrame.Parent = content
-	
 	local listLayout = Instance.new("UIListLayout")
 	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	listLayout.Padding = UDim.new(0, 3)
 	listLayout.Parent = scrollFrame
-	
 	local padding = Instance.new("UIPadding")
 	padding.PaddingTop = UDim.new(0, 3)
 	padding.PaddingBottom = UDim.new(0, 3)
 	padding.PaddingLeft = UDim.new(0, 3)
 	padding.PaddingRight = UDim.new(0, 3)
 	padding.Parent = scrollFrame
-	
 	chatSpyFrame = mainFrame
 	chatSpyScrollFrame = scrollFrame
-	
 	local dragging = false
 	local dragStart = nil
 	local startPos = nil
-	
 	header.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
@@ -1234,20 +892,17 @@ local function createChatSpyUI()
 			startPos = mainFrame.Position
 		end
 	end)
-	
 	header.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = false
 		end
 	end)
-	
 	UserInputService.InputChanged:Connect(function(input)
 		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 			local delta = input.Position - dragStart
 			mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 		end
 	end)
-	
 	minimizeBtn.MouseButton1Click:Connect(function()
 		chatSpyMinimized = not chatSpyMinimized
 		if chatSpyMinimized then
@@ -1260,7 +915,6 @@ local function createChatSpyUI()
 			minimizeBtn.Text = "−"
 		end
 	end)
-	
 	clearBtn.MouseButton1Click:Connect(function()
 		for _, child in ipairs(scrollFrame:GetChildren()) do
 			if child:IsA("Frame") then
@@ -1270,7 +924,6 @@ local function createChatSpyUI()
 		chatSpyMessages = {}
 		msgCount.Text = "0"
 	end)
-	
 	local function addHover(button)
 		button.MouseEnter:Connect(function()
 			TweenService:Create(button, TweenInfo.new(0.1), {BackgroundColor3 = customTheme.Stroke}):Play()
@@ -1279,16 +932,13 @@ local function createChatSpyUI()
 			TweenService:Create(button, TweenInfo.new(0.1), {BackgroundColor3 = customTheme.Field}):Play()
 		end)
 	end
-	
 	addHover(minimizeBtn)
 	addHover(clearBtn)
-	
 	return screenGui
 end
 
 local function addChatSpyMessage(sender, message, isHidden)
 	if not chatSpyScrollFrame then return end
-	
 	local msgFrame = Instance.new("Frame")
 	msgFrame.Name = "Message"
 	msgFrame.Size = UDim2.new(1, 0, 0, 0)
@@ -1296,22 +946,18 @@ local function addChatSpyMessage(sender, message, isHidden)
 	msgFrame.BackgroundColor3 = isHidden and Color3.fromRGB(40, 20, 20) or customTheme.Field
 	msgFrame.BorderSizePixel = 0
 	msgFrame.LayoutOrder = #chatSpyMessages + 1
-	
 	local msgCorner = Instance.new("UICorner")
 	msgCorner.CornerRadius = UDim.new(0, 4)
 	msgCorner.Parent = msgFrame
-	
 	local msgPadding = Instance.new("UIPadding")
 	msgPadding.PaddingTop = UDim.new(0, 5)
 	msgPadding.PaddingBottom = UDim.new(0, 5)
 	msgPadding.PaddingLeft = UDim.new(0, 8)
 	msgPadding.PaddingRight = UDim.new(0, 8)
 	msgPadding.Parent = msgFrame
-	
 	local typeColor = isHidden and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100)
 	local typeIcon = isHidden and "🔒" or "💬"
 	local typeText = isHidden and "HIDDEN" or "PUBLIC"
-	
 	local timeLabel = Instance.new("TextLabel")
 	timeLabel.Name = "Time"
 	timeLabel.Size = UDim2.new(0, 45, 0, 14)
@@ -1323,7 +969,6 @@ local function addChatSpyMessage(sender, message, isHidden)
 	timeLabel.Font = Enum.Font.Gotham
 	timeLabel.TextXAlignment = Enum.TextXAlignment.Left
 	timeLabel.Parent = msgFrame
-	
 	local typeBadge = Instance.new("TextLabel")
 	typeBadge.Name = "TypeBadge"
 	typeBadge.Size = UDim2.new(0, 60, 0, 14)
@@ -1335,11 +980,9 @@ local function addChatSpyMessage(sender, message, isHidden)
 	typeBadge.TextSize = 9
 	typeBadge.Font = Enum.Font.GothamBold
 	typeBadge.Parent = msgFrame
-	
 	local typeBadgeCorner = Instance.new("UICorner")
 	typeBadgeCorner.CornerRadius = UDim.new(0, 3)
 	typeBadgeCorner.Parent = typeBadge
-	
 	local senderLabel = Instance.new("TextLabel")
 	senderLabel.Name = "Sender"
 	senderLabel.Size = UDim2.new(1, -115, 0, 14)
@@ -1352,7 +995,6 @@ local function addChatSpyMessage(sender, message, isHidden)
 	senderLabel.TextXAlignment = Enum.TextXAlignment.Left
 	senderLabel.TextTruncate = Enum.TextTruncate.AtEnd
 	senderLabel.Parent = msgFrame
-	
 	local messageLabel = Instance.new("TextLabel")
 	messageLabel.Name = "MessageText"
 	messageLabel.Size = UDim2.new(1, 0, 0, 0)
@@ -1366,25 +1008,19 @@ local function addChatSpyMessage(sender, message, isHidden)
 	messageLabel.TextXAlignment = Enum.TextXAlignment.Left
 	messageLabel.TextWrapped = true
 	messageLabel.Parent = msgFrame
-	
 	msgFrame.Parent = chatSpyScrollFrame
-	
 	table.insert(chatSpyMessages, msgFrame)
-	
 	local msgCountLabel = chatSpyFrame:FindFirstChild("Header"):FindFirstChild("MsgCount")
 	if msgCountLabel then
 		msgCountLabel.Text = tostring(#chatSpyMessages)
 	end
-	
-	if #chatSpyMessages > maxChatSpyMessages then
+	if #chatSpyMessages > Constants.MAX_CHAT_MESSAGES then
 		local oldMsg = table.remove(chatSpyMessages, 1)
 		if oldMsg then oldMsg:Destroy() end
 	end
-	
 	task.defer(function()
 		chatSpyScrollFrame.CanvasPosition = Vector2.new(0, chatSpyScrollFrame.AbsoluteCanvasSize.Y)
 	end)
-	
 	msgFrame.BackgroundTransparency = 1
 	TweenService:Create(msgFrame, TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
 end
@@ -1394,15 +1030,11 @@ local function setupChatSpy()
 		pcall(function() conn:Disconnect() end)
 	end
 	chatSpyConnections = {}
-	
 	createChatSpyUI()
-	
 	chatSpyInstance = chatSpyInstance + 1
 	local currentInstance = chatSpyInstance
-	
 	local saymsg = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
 	local getmsg = saymsg and saymsg:FindFirstChild("OnMessageDoneFiltering")
-	
 	if not getmsg then
 		pcall(function()
 			saymsg = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents", 5)
@@ -1411,16 +1043,12 @@ local function setupChatSpy()
 			end
 		end)
 	end
-	
 	local function onChatted(player, msg)
 		if currentInstance ~= chatSpyInstance then return end
 		if not chatSpyEnabled then return end
 		if not spyOnMyself and player == LocalPlayer then return end
-		
 		msg = msg:gsub("[\n\r]", ''):gsub("\t", ' '):gsub("[ ]+", ' ')
-		
 		local hidden = true
-		
 		if getmsg then
 			local conn
 			conn = getmsg.OnClientEvent:Connect(function(packet, channel)
@@ -1437,14 +1065,11 @@ local function setupChatSpy()
 					end
 				end
 			end)
-			
 			task.wait(1)
 			conn:Disconnect()
 		end
-		
 		if chatSpyEnabled and currentInstance == chatSpyInstance then
 			addChatSpyMessage(player.Name, msg, hidden)
-			
 			if hidden then
 				pcall(function()
 					StarterGui:SetCore("ChatMakeSystemMessage", {
@@ -1457,14 +1082,12 @@ local function setupChatSpy()
 			end
 		end
 	end
-	
 	for _, player in ipairs(Players:GetPlayers()) do
 		local conn = player.Chatted:Connect(function(msg)
 			onChatted(player, msg)
 		end)
 		table.insert(chatSpyConnections, conn)
 	end
-	
 	local playerAddedConn = Players.PlayerAdded:Connect(function(player)
 		local conn = player.Chatted:Connect(function(msg)
 			onChatted(player, msg)
@@ -1472,7 +1095,6 @@ local function setupChatSpy()
 		table.insert(chatSpyConnections, conn)
 	end)
 	table.insert(chatSpyConnections, playerAddedConn)
-	
 	pcall(function()
 		local channels = TextChatService:FindFirstChild("TextChannels")
 		if channels then
@@ -1481,7 +1103,6 @@ local function setupChatSpy()
 				local conn = channel.MessageReceived:Connect(function(msg)
 					if not chatSpyEnabled then return end
 					if currentInstance ~= chatSpyInstance then return end
-					
 					pcall(function()
 						if msg.TextSource then
 							local player = Players:GetPlayerByUserId(msg.TextSource.UserId)
@@ -1496,11 +1117,9 @@ local function setupChatSpy()
 				end)
 				table.insert(chatSpyConnections, conn)
 			end
-			
 			for _, channel in pairs(channels:GetChildren()) do
 				connectChannel(channel)
 			end
-			
 			local addedConn = channels.ChildAdded:Connect(function(channel)
 				task.wait(0.1)
 				connectChannel(channel)
@@ -1508,7 +1127,6 @@ local function setupChatSpy()
 			table.insert(chatSpyConnections, addedConn)
 		end
 	end)
-	
 	addChatSpyMessage("SYSTEM", "Chat Spy enabled - monitoring messages...", false)
 end
 
@@ -1517,14 +1135,12 @@ local function cleanupChatSpy()
 		pcall(function() conn:Disconnect() end)
 	end
 	chatSpyConnections = {}
-	
 	if chatSpyUI then
 		chatSpyUI:Destroy()
 		chatSpyUI = nil
 		chatSpyFrame = nil
 		chatSpyScrollFrame = nil
 	end
-	
 	chatSpyMessages = {}
 end
 
@@ -1785,24 +1401,18 @@ local function resetCharacterStats()
 	local character, humanoid = GetCharacterParts()
 	if not humanoid then return end
 	if not walkSpeedEnabled then
-		humanoid.WalkSpeed = 16
+		humanoid.WalkSpeed = Constants.DEFAULT_WALK_SPEED
 	end
 	if not jumpPowerEnabled then
-		humanoid.JumpPower = 50
+		humanoid.JumpPower = Constants.DEFAULT_JUMP_POWER
 	end
 end
 
-local function cleanupAll()
-	cleanupFly()
-	cleanupCFrameSpeed()
-	cleanupWalkSpeed()
-	cleanupJumpPower()
-	stop360Spin()
-	stopFellLoop()
-	disableNoclip()
-	disableAntiFling()
-	cleanupChatSpy()
-	StopTrigger()
+local function clearVelocityCache()
+	VelocityCache.previousPositions = {}
+	VelocityCache.smoothedVelocities = {}
+	VelocityCache.lastUpdateTimes = {}
+	VelocityCache.accelerationCache = {}
 end
 
 local function onCharacterAdded(character)
@@ -1816,15 +1426,7 @@ local function onCharacterAdded(character)
 	disableNoclip()
 	disableAntiFling()
 	StopTrigger()
-	isMouseHeld = false
-	if Silent.Active then
-		UnblockGunInput()
-		Silent.BlockedConnections = {}
-	end
-	previousPositions = {}
-	smoothedVelocities = {}
-	lastUpdateTimes = {}
-	accelerationCache = {}
+	clearVelocityCache()
 	local humanoid = character:WaitForChild("Humanoid", 10)
 	if not humanoid then
 		isResetting = false
@@ -1861,21 +1463,6 @@ local function onCharacterAdded(character)
 	end
 	if Trigger.Active then
 		StartTrigger()
-	end
-	if Silent.Active then
-		if Silent.CharacterConnection then
-			Silent.CharacterConnection:Disconnect()
-		end
-		Silent.CharacterConnection = character.ChildAdded:Connect(function(child)
-			if child:IsA("Tool") and Silent.Active then
-				task.wait(0.1)
-				BlockGunInput(child)
-			end
-		end)
-		local gun = GetEquippedGun()
-		if gun then
-			BlockGunInput(gun)
-		end
 	end
 	humanoid.Died:Connect(function()
 		cleanupFly()
@@ -1988,7 +1575,7 @@ end
 CameraLockSection:AddSlider({
 	Name = "FOV",
 	Type = "px",
-	Default = 100,
+	Default = Constants.DEFAULT_FOV,
 	Min = 10,
 	Max = 500,
 	Round = 0,
@@ -1999,7 +1586,7 @@ CameraLockSection:AddSlider({
 CameraLockSection:AddSlider({
 	Name = "Smoothness",
 	Type = "",
-	Default = 0.1,
+	Default = Constants.DEFAULT_SMOOTHNESS,
 	Min = 0,
 	Max = 0.95,
 	Round = 2,
@@ -2047,7 +1634,7 @@ end
 SilentSection:AddSlider({
 	Name = "FOV",
 	Type = "px",
-	Default = 100,
+	Default = Constants.DEFAULT_FOV,
 	Min = 10,
 	Max = 500,
 	Round = 0,
@@ -2058,7 +1645,7 @@ SilentSection:AddSlider({
 SilentSection:AddSlider({
 	Name = "Smoothing Tau",
 	Type = "s",
-	Default = 0.15,
+	Default = Constants.DEFAULT_TAU,
 	Min = 0.05,
 	Max = 0.50,
 	Round = 2,
@@ -2094,7 +1681,7 @@ SilentSection:AddToggle({
 SilentSection:AddSlider({
 	Name = "Auto Pred Divisor",
 	Type = "",
-	Default = 250,
+	Default = Constants.DEFAULT_AUTO_PRED_DIVISOR,
 	Min = 200,
 	Max = 350,
 	Round = 0,
@@ -2274,7 +1861,7 @@ local Human = Misc:AddSection({ Name = "Human", Side = "left", ShowTitle = true,
 local WalkSpeedSlider = Human:AddSlider({
 	Name = "Speed",
 	Type = "",
-	Default = 16,
+	Default = Constants.DEFAULT_WALK_SPEED,
 	Min = 16,
 	Max = 200,
 	Round = 0,
@@ -2315,7 +1902,7 @@ end
 local JumpPowerSlider = Human:AddSlider({
 	Name = "Power",
 	Type = "",
-	Default = 50,
+	Default = Constants.DEFAULT_JUMP_POWER,
 	Min = 50,
 	Max = 200,
 	Round = 0,

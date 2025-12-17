@@ -6,6 +6,9 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local Stats = game:GetService("Stats")
+local TextChatService = game:GetService("TextChatService")
+local CoreGui = game:GetService("CoreGui")
+local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 local MainEvent = ReplicatedStorage:WaitForChild("MainEvent")
@@ -84,6 +87,18 @@ local Silent = {
 	Tau = 0.15,
 }
 
+local Trigger = {
+	Enabled = false,
+	Active = false,
+	Connection = nil,
+	LastShot = 0,
+	Delay = 0.05,
+	MinDelay = 0.05,
+	LastTarget = nil,
+	HasShotTarget = false,
+	LastGun = nil,
+}
+
 local PREDICTION_BASE = 0.095
 local PREDICTION_TAU = 0.15
 local SERVER_TICK_INTERVAL = 1/60
@@ -99,11 +114,14 @@ local accelerationCache = {}
 local ESP = {
 	ShowCameraLockFOV = true,
 	ShowSilentFOV = true,
+	ShowTriggerFOV = true,
 	CameraLockFOVColor = Color3.fromRGB(255, 255, 255),
 	SilentFOVColor = Color3.fromRGB(0, 255, 255),
+	TriggerFOVColor = Color3.fromRGB(255, 165, 0),
 	LockedColor = Color3.fromRGB(255, 70, 70),
 	CameraLockCircle = nil,
 	SilentCircle = nil,
+	TriggerCircle = nil,
 }
 
 local movementKeys = {w = false, a = false, s = false, d = false}
@@ -121,13 +139,11 @@ local cframeSpeedValue = 1
 local cframeSpeedConnection = nil
 local cframeSpeedActive = false
 
-
 local isMouseHeld = false
 local silentHoldConnection = nil
 local silentSpeedFixConnection = nil
 local savedWalkSpeed = 16
 
--- Оружия, на которых зажим НЕ работает (только одиночные выстрелы)
 local NO_HOLD_FIRE_WEAPONS = {
 	["GLOCK"] = true,
 	["SILENCER"] = true,
@@ -138,14 +154,12 @@ local NO_HOLD_FIRE_WEAPONS = {
 	["AUG"] = true,
 }
 
--- Оружия, которые вообще не должны работать с сайлентом
 local NO_SILENT_WEAPONS = {
 	["GRENADE"] = true,
 	["RPG"] = true,
 	["FLAMETHROWER"] = true,
 }
 
--- Ближнее оружие (не должно работать с сайлентом)
 local MELEE_WEAPONS = {
 	["PITCHFORK"] = true,
 	["KNIFE"] = true,
@@ -176,6 +190,21 @@ local noclipConnection = nil
 
 local antiflingEnabled = false
 local antiflingConnection = nil
+
+local infiniteZoomEnabled = false
+local defaultMaxZoom = 128
+local defaultMinZoom = 0.5
+
+local chatSpyEnabled = false
+local chatSpyInstance = 0
+local chatSpyConnections = {}
+local chatSpyUI = nil
+local chatSpyFrame = nil
+local chatSpyScrollFrame = nil
+local chatSpyMessages = {}
+local maxChatSpyMessages = 100
+local chatSpyMinimized = false
+local spyOnMyself = false
 
 local UIElements = {}
 
@@ -383,6 +412,21 @@ local function PredictPosition(character, hitbox, prediction)
 	return hitbox.Position
 end
 
+local function IsCharacterAlive(character)
+	if not character or not character.Parent then return false end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return false end
+	if humanoid.Health <= 0 then return false end
+	local bodyEffects = character:FindFirstChild("BodyEffects")
+	if bodyEffects then
+		local ko = bodyEffects:FindFirstChild("K.O")
+		if ko and ko.Value then return false end
+		local dead = bodyEffects:FindFirstChild("Dead")
+		if dead and dead.Value then return false end
+	end
+	return true
+end
+
 local function GetTarget(fov, useVisibleCheck, forSilent)
 	if not Aimbot.Enabled then return nil end
 	local myChar, myHum, myRoot = GetCharacterParts()
@@ -446,15 +490,12 @@ local function IsNoSilentWeapon(gun)
 	return NO_SILENT_WEAPONS[gunName] == true
 end
 
-
 local function CanShootSilent()
 	local char, hum = GetCharacterParts()
 	if not char or not hum then return false, nil end
 	local gun = GetEquippedGun()
 	if not gun then return false, nil end
-	-- Ближнее оружие не работает с сайлентом
 	if IsMeleeWeapon(gun) then return false, nil end
-	-- Определенные оружия не работают с сайлентом вообще
 	if IsNoSilentWeapon(gun) then return false, nil end
 	local ammo = gun:FindFirstChild("Ammo")
 	if ammo and ammo.Value <= 0 then return false, nil end
@@ -463,7 +504,6 @@ local function CanShootSilent()
 	if bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then return false, nil end
 	if bodyEffects:FindFirstChild("Dead") and bodyEffects.Dead.Value then return false, nil end
 	if bodyEffects:FindFirstChild("Reload") and bodyEffects.Reload.Value then return false, nil end
-	-- Проверка кулдауна происходит через ShootingCooldown в функциях стрельбы
 	return true, gun
 end
 
@@ -518,7 +558,6 @@ local function FireModifiedShot(target)
 	return true
 end
 
-
 local function BlockGunInput(gun)
 	if not gun then return end
 	local localScript = gun:FindFirstChild("LocalScript")
@@ -553,7 +592,6 @@ end
 
 local function StartSpeedFix()
 	if silentSpeedFixConnection then return end
-	-- Сохраняем текущую скорость
 	local char, hum = GetCharacterParts()
 	if hum then
 		savedWalkSpeed = hum.WalkSpeed
@@ -562,7 +600,6 @@ local function StartSpeedFix()
 		if not Silent.Active then return end
 		local character, humanoid = GetCharacterParts()
 		if not humanoid then return end
-		-- Если скорость упала ниже сохраненной - восстанавливаем
 		if humanoid.WalkSpeed < savedWalkSpeed and not walkSpeedEnabled then
 			humanoid.WalkSpeed = savedWalkSpeed
 		end
@@ -583,12 +620,10 @@ local function OnSilentInputBegan(input, gameProcessed)
 	isMouseHeld = true
 	local gun = GetEquippedGun()
 	if not gun then return end
-	-- Стреляем только если есть цель
 	local target = GetTarget(Silent.FOV, true, true)
 	if target then
 		FireModifiedShot(target)
 	end
-	-- Если нет цели - ничего не делаем, игрок стреляет сам через оригинальный скрипт
 end
 
 local function OnSilentInputEnded(input)
@@ -602,19 +637,13 @@ local function OnSilentHoldUpdate()
 	if not isMouseHeld then return end
 	local gun = GetEquippedGun()
 	if not gun then return end
-	
-	-- Проверяем, можно ли зажимать на этом оружии
 	if not CanHoldFire(gun) then return end
-	
 	local canShootResult = CanShootSilent()
 	if not canShootResult then return end
-	
-	-- Стреляем только если есть цель
 	local target = GetTarget(Silent.FOV, true, true)
 	if target then
 		FireModifiedShot(target)
 	end
-	-- Если нет цели - ничего не делаем
 end
 
 local function OnSilentRenderStep()
@@ -672,6 +701,197 @@ local function DisableSilent()
 		silentHoldConnection:Disconnect()
 		silentHoldConnection = nil
 	end
+end
+
+local function GetTriggerTarget()
+	local myChar = LocalPlayer.Character
+	if not myChar then return nil end
+	
+	-- Если сайлент активен, используем его цель или его FOV логику
+	if Silent.Active then
+		-- Сначала проверяем, есть ли уже цель у сайлента
+		if Silent.CurrentTarget then
+			local targetChar = Silent.CurrentTarget.Character
+			if targetChar and IsCharacterAlive(targetChar) then
+				return Silent.CurrentTarget
+			end
+		end
+		-- Если нет, ищем через FOV сайлента
+		return GetTarget(Silent.FOV, true, true)
+	end
+	
+	-- Когда сайлент не активен - используем raycast под курсором
+	local mouse = LocalPlayer:GetMouse()
+	local ray = Camera:ScreenPointToRay(mouse.X, mouse.Y)
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = {myChar, Camera, workspace:FindFirstChild("Bush"), workspace:FindFirstChild("Ignored")}
+	local result = workspace:Raycast(ray.Origin, ray.Direction * 1000, raycastParams)
+	
+	if result and result.Instance then
+		local hit = result.Instance
+		local targetPlayer = Players:GetPlayerFromCharacter(hit.Parent) or Players:GetPlayerFromCharacter(hit.Parent.Parent)
+		if targetPlayer and targetPlayer ~= LocalPlayer then
+			local targetChar = targetPlayer.Character
+			if targetChar and IsCharacterAlive(targetChar) then
+				return targetPlayer
+			end
+		end
+	end
+	return nil
+end
+
+local function GetWeaponFireRate(gun)
+	if not gun then return 0.1 end
+	local fireRate = gun:FindFirstChild("FireRate")
+	if fireRate and fireRate:IsA("NumberValue") then
+		return math.max(fireRate.Value, 0.05)
+	end
+	-- Дефолтные значения для известного оружия
+	local gunName = gun.Name:upper()
+	local defaultRates = {
+		["GLOCK"] = 0.15,
+		["SILENCER"] = 0.15,
+		["DOUBLE BARREL"] = 0.8,
+		["SHOTGUN"] = 0.6,
+		["TACTICAL SHOTGUN"] = 0.4,
+		["REVOLVER"] = 0.5,
+		["AUG"] = 0.1,
+		["AK47"] = 0.1,
+		["AR"] = 0.1,
+		["SMG"] = 0.08,
+		["UZI"] = 0.07,
+		["TEC9"] = 0.07,
+		["LMG"] = 0.09,
+		["RIFLE"] = 0.12,
+	}
+	return defaultRates[gunName] or 0.1
+end
+
+local function TriggerShoot()
+	-- Проверка задержки между выстрелами
+	local currentTime = tick()
+	if currentTime - Trigger.LastShot < Trigger.Delay then
+		return
+	end
+	
+	local target = GetTriggerTarget()
+	
+	-- Получаем оружие в зависимости от состояния сайлента
+	local gun = nil
+	if Silent.Active then
+		local canShootResult, gunResult = CanShootSilent()
+		if not canShootResult or not gunResult then 
+			-- Если не можем стрелять, сбрасываем состояние если цель изменилась
+			if target ~= Trigger.LastTarget then
+				Trigger.HasShotTarget = false
+				Trigger.LastTarget = target
+			end
+			return 
+		end
+		gun = gunResult
+	else
+		local canShootResult, gunResult = CanShoot()
+		if not canShootResult or not gunResult then 
+			-- Если не можем стрелять, сбрасываем состояние если цель изменилась
+			if target ~= Trigger.LastTarget then
+				Trigger.HasShotTarget = false
+				Trigger.LastTarget = target
+			end
+			return 
+		end
+		gun = gunResult
+	end
+	
+	-- Сбрасываем флаг если цель сменилась или стала nil
+	if target ~= Trigger.LastTarget then
+		Trigger.HasShotTarget = false
+		Trigger.LastTarget = target
+	end
+	
+	-- Сбрасываем флаг если оружие сменилось
+	if gun ~= Trigger.LastGun then
+		Trigger.HasShotTarget = false
+		Trigger.LastGun = gun
+	end
+	
+	-- Если нет цели, выходим (состояние уже сброшено выше)
+	if not target then
+		return
+	end
+	
+	-- Для полуавтоматического оружия проверяем, не стреляли ли мы уже по этой цели
+	local isSemiAuto = not CanHoldFire(gun)
+	if isSemiAuto and Trigger.HasShotTarget and target == Trigger.LastTarget then
+		-- Уже стреляли по этой цели полуавтоматом, пропускаем
+		return
+	end
+	
+	-- Устанавливаем задержку на основе скорострельности оружия
+	local fireRate = GetWeaponFireRate(gun)
+	Trigger.Delay = math.max(fireRate + 0.02, Trigger.MinDelay)
+	
+	local shotSuccess = false
+	
+	if Silent.Active then
+		-- Когда сайлент активен, используем его логику выстрела
+		if FireModifiedShot(target) then
+			Trigger.LastShot = currentTime
+			shotSuccess = true
+		end
+	else
+		-- Когда сайлент не активен, используем обычный клик
+		pcall(function()
+			if mouse1click then
+				mouse1click()
+				Trigger.LastShot = currentTime
+				shotSuccess = true
+			end
+		end)
+	end
+	
+	-- После успешного выстрела обновляем состояние
+	if shotSuccess then
+		Trigger.LastTarget = target
+		Trigger.LastGun = gun
+		-- Для полуавтомата устанавливаем флаг, что уже стреляли по этой цели
+		if isSemiAuto then
+			Trigger.HasShotTarget = true
+		else
+			-- Для автоматического оружия сбрасываем флаг, чтобы стрелять непрерывно
+			Trigger.HasShotTarget = false
+		end
+	end
+end
+
+local function StartTrigger()
+	if Trigger.Connection then return end
+	Trigger.LastShot = 0
+	-- Сбрасываем состояние при старте
+	Trigger.LastTarget = nil
+	Trigger.HasShotTarget = false
+	Trigger.LastGun = nil
+	
+	Trigger.Connection = RunService.RenderStepped:Connect(function()
+		if not Trigger.Active then return end
+		if menuOpen then return end
+		
+		-- Не стрелять если уже держим мышку (сайлент сам стреляет)
+		if Silent.Active and isMouseHeld then return end
+		
+		TriggerShoot()
+	end)
+end
+
+local function StopTrigger()
+	if Trigger.Connection then
+		Trigger.Connection:Disconnect()
+		Trigger.Connection = nil
+	end
+	-- Сбрасываем состояние триггербота
+	Trigger.LastTarget = nil
+	Trigger.HasShotTarget = false
+	Trigger.LastGun = nil
 end
 
 local function CalculateSmoothFactor(smoothness, deltaTime)
@@ -757,6 +977,14 @@ local function CreateFOVCircles()
 		ESP.SilentCircle.Visible = false
 		ESP.SilentCircle.Transparency = 0.7
 	end
+	if not ESP.TriggerCircle then
+		ESP.TriggerCircle = Drawing.new("Circle")
+		ESP.TriggerCircle.Thickness = 1
+		ESP.TriggerCircle.NumSides = 64
+		ESP.TriggerCircle.Filled = false
+		ESP.TriggerCircle.Visible = false
+		ESP.TriggerCircle.Transparency = 0.7
+	end
 end
 
 local function UpdateFOVCircles()
@@ -791,6 +1019,10 @@ local function UpdateFOVCircles()
 			ESP.SilentCircle.Color = ESP.SilentFOVColor
 		end
 	end
+	if ESP.TriggerCircle then
+		-- Триггер работает через raycast или FOV сайлента
+		ESP.TriggerCircle.Visible = false
+	end
 end
 
 CreateFOVCircles()
@@ -798,6 +1030,503 @@ CreateFOVCircles()
 RunService.RenderStepped:Connect(function()
 	pcall(UpdateFOVCircles)
 end)
+
+local function enableInfiniteZoom()
+	defaultMaxZoom = LocalPlayer.CameraMaxZoomDistance
+	defaultMinZoom = LocalPlayer.CameraMinZoomDistance
+	LocalPlayer.CameraMaxZoomDistance = 9999
+	LocalPlayer.CameraMinZoomDistance = 0.5
+end
+
+local function disableInfiniteZoom()
+	LocalPlayer.CameraMaxZoomDistance = defaultMaxZoom
+	LocalPlayer.CameraMinZoomDistance = defaultMinZoom
+end
+
+local function createChatSpyUI()
+	if chatSpyUI then
+		chatSpyUI:Destroy()
+	end
+	
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "ChatSpyUI"
+	screenGui.ResetOnSpawn = false
+	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	screenGui.DisplayOrder = 999
+	
+	pcall(function()
+		screenGui.Parent = CoreGui
+	end)
+	if not screenGui.Parent then
+		screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+	end
+	
+	chatSpyUI = screenGui
+	
+	local mainFrame = Instance.new("Frame")
+	mainFrame.Name = "MainFrame"
+	mainFrame.Size = UDim2.new(0, 350, 0, 300)
+	mainFrame.Position = UDim2.new(1, -370, 0.5, -150)
+	mainFrame.BackgroundColor3 = customTheme.Background
+	mainFrame.BorderSizePixel = 0
+	mainFrame.ClipsDescendants = true
+	mainFrame.Parent = screenGui
+	
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = mainFrame
+	
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = customTheme.Accent
+	stroke.Thickness = 1
+	stroke.Transparency = 0.5
+	stroke.Parent = mainFrame
+	
+	local shadow = Instance.new("ImageLabel")
+	shadow.Name = "Shadow"
+	shadow.Size = UDim2.new(1, 30, 1, 30)
+	shadow.Position = UDim2.new(0, -15, 0, -15)
+	shadow.BackgroundTransparency = 1
+	shadow.Image = "rbxassetid://6014261993"
+	shadow.ImageColor3 = Color3.fromRGB(0, 0, 0)
+	shadow.ImageTransparency = 0.5
+	shadow.ScaleType = Enum.ScaleType.Slice
+	shadow.SliceCenter = Rect.new(49, 49, 450, 450)
+	shadow.ZIndex = -1
+	shadow.Parent = mainFrame
+	
+	local header = Instance.new("Frame")
+	header.Name = "Header"
+	header.Size = UDim2.new(1, 0, 0, 35)
+	header.BackgroundColor3 = customTheme.Header
+	header.BorderSizePixel = 0
+	header.Parent = mainFrame
+	
+	local headerCorner = Instance.new("UICorner")
+	headerCorner.CornerRadius = UDim.new(0, 8)
+	headerCorner.Parent = header
+	
+	local headerFix = Instance.new("Frame")
+	headerFix.Name = "HeaderFix"
+	headerFix.Size = UDim2.new(1, 0, 0, 10)
+	headerFix.Position = UDim2.new(0, 0, 1, -10)
+	headerFix.BackgroundColor3 = customTheme.Header
+	headerFix.BorderSizePixel = 0
+	headerFix.Parent = header
+	
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Size = UDim2.new(1, -80, 1, 0)
+	title.Position = UDim2.new(0, 12, 0, 0)
+	title.BackgroundTransparency = 1
+	title.Text = "🔍 Chat Spy"
+	title.TextColor3 = customTheme.Accent
+	title.TextSize = 14
+	title.Font = Enum.Font.GothamBold
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = header
+	
+	local statusDot = Instance.new("Frame")
+	statusDot.Name = "StatusDot"
+	statusDot.Size = UDim2.new(0, 8, 0, 8)
+	statusDot.Position = UDim2.new(0, 95, 0.5, -4)
+	statusDot.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+	statusDot.BorderSizePixel = 0
+	statusDot.Parent = header
+	
+	local statusDotCorner = Instance.new("UICorner")
+	statusDotCorner.CornerRadius = UDim.new(1, 0)
+	statusDotCorner.Parent = statusDot
+	
+	local msgCount = Instance.new("TextLabel")
+	msgCount.Name = "MsgCount"
+	msgCount.Size = UDim2.new(0, 50, 1, 0)
+	msgCount.Position = UDim2.new(1, -120, 0, 0)
+	msgCount.BackgroundTransparency = 1
+	msgCount.Text = "0"
+	msgCount.TextColor3 = customTheme.TextDim
+	msgCount.TextSize = 12
+	msgCount.Font = Enum.Font.Gotham
+	msgCount.TextXAlignment = Enum.TextXAlignment.Right
+	msgCount.Parent = header
+	
+	local minimizeBtn = Instance.new("TextButton")
+	minimizeBtn.Name = "MinimizeBtn"
+	minimizeBtn.Size = UDim2.new(0, 25, 0, 25)
+	minimizeBtn.Position = UDim2.new(1, -60, 0, 5)
+	minimizeBtn.BackgroundColor3 = customTheme.Field
+	minimizeBtn.BorderSizePixel = 0
+	minimizeBtn.Text = "−"
+	minimizeBtn.TextColor3 = customTheme.Text
+	minimizeBtn.TextSize = 18
+	minimizeBtn.Font = Enum.Font.GothamBold
+	minimizeBtn.Parent = header
+	
+	local minimizeBtnCorner = Instance.new("UICorner")
+	minimizeBtnCorner.CornerRadius = UDim.new(0, 4)
+	minimizeBtnCorner.Parent = minimizeBtn
+	
+	local clearBtn = Instance.new("TextButton")
+	clearBtn.Name = "ClearBtn"
+	clearBtn.Size = UDim2.new(0, 25, 0, 25)
+	clearBtn.Position = UDim2.new(1, -30, 0, 5)
+	clearBtn.BackgroundColor3 = customTheme.Field
+	clearBtn.BorderSizePixel = 0
+	clearBtn.Text = "🗑"
+	clearBtn.TextColor3 = customTheme.Text
+	clearBtn.TextSize = 12
+	clearBtn.Font = Enum.Font.Gotham
+	clearBtn.Parent = header
+	
+	local clearBtnCorner = Instance.new("UICorner")
+	clearBtnCorner.CornerRadius = UDim.new(0, 4)
+	clearBtnCorner.Parent = clearBtn
+	
+	local content = Instance.new("Frame")
+	content.Name = "Content"
+	content.Size = UDim2.new(1, -10, 1, -45)
+	content.Position = UDim2.new(0, 5, 0, 40)
+	content.BackgroundColor3 = customTheme.Panel
+	content.BorderSizePixel = 0
+	content.ClipsDescendants = true
+	content.Parent = mainFrame
+	
+	local contentCorner = Instance.new("UICorner")
+	contentCorner.CornerRadius = UDim.new(0, 6)
+	contentCorner.Parent = content
+	
+	local scrollFrame = Instance.new("ScrollingFrame")
+	scrollFrame.Name = "ScrollFrame"
+	scrollFrame.Size = UDim2.new(1, -6, 1, -6)
+	scrollFrame.Position = UDim2.new(0, 3, 0, 3)
+	scrollFrame.BackgroundTransparency = 1
+	scrollFrame.BorderSizePixel = 0
+	scrollFrame.ScrollBarThickness = 4
+	scrollFrame.ScrollBarImageColor3 = customTheme.Accent
+	scrollFrame.ScrollBarImageTransparency = 0.3
+	scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scrollFrame.Parent = content
+	
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	listLayout.Padding = UDim.new(0, 3)
+	listLayout.Parent = scrollFrame
+	
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, 3)
+	padding.PaddingBottom = UDim.new(0, 3)
+	padding.PaddingLeft = UDim.new(0, 3)
+	padding.PaddingRight = UDim.new(0, 3)
+	padding.Parent = scrollFrame
+	
+	chatSpyFrame = mainFrame
+	chatSpyScrollFrame = scrollFrame
+	
+	local dragging = false
+	local dragStart = nil
+	local startPos = nil
+	
+	header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = mainFrame.Position
+		end
+	end)
+	
+	header.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+	
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+	end)
+	
+	minimizeBtn.MouseButton1Click:Connect(function()
+		chatSpyMinimized = not chatSpyMinimized
+		if chatSpyMinimized then
+			TweenService:Create(mainFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {Size = UDim2.new(0, 350, 0, 35)}):Play()
+			minimizeBtn.Text = "+"
+			content.Visible = false
+		else
+			content.Visible = true
+			TweenService:Create(mainFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {Size = UDim2.new(0, 350, 0, 300)}):Play()
+			minimizeBtn.Text = "−"
+		end
+	end)
+	
+	clearBtn.MouseButton1Click:Connect(function()
+		for _, child in ipairs(scrollFrame:GetChildren()) do
+			if child:IsA("Frame") then
+				child:Destroy()
+			end
+		end
+		chatSpyMessages = {}
+		msgCount.Text = "0"
+	end)
+	
+	local function addHover(button)
+		button.MouseEnter:Connect(function()
+			TweenService:Create(button, TweenInfo.new(0.1), {BackgroundColor3 = customTheme.Stroke}):Play()
+		end)
+		button.MouseLeave:Connect(function()
+			TweenService:Create(button, TweenInfo.new(0.1), {BackgroundColor3 = customTheme.Field}):Play()
+		end)
+	end
+	
+	addHover(minimizeBtn)
+	addHover(clearBtn)
+	
+	return screenGui
+end
+
+local function addChatSpyMessage(sender, message, isHidden)
+	if not chatSpyScrollFrame then return end
+	
+	local msgFrame = Instance.new("Frame")
+	msgFrame.Name = "Message"
+	msgFrame.Size = UDim2.new(1, 0, 0, 0)
+	msgFrame.AutomaticSize = Enum.AutomaticSize.Y
+	msgFrame.BackgroundColor3 = isHidden and Color3.fromRGB(40, 20, 20) or customTheme.Field
+	msgFrame.BorderSizePixel = 0
+	msgFrame.LayoutOrder = #chatSpyMessages + 1
+	
+	local msgCorner = Instance.new("UICorner")
+	msgCorner.CornerRadius = UDim.new(0, 4)
+	msgCorner.Parent = msgFrame
+	
+	local msgPadding = Instance.new("UIPadding")
+	msgPadding.PaddingTop = UDim.new(0, 5)
+	msgPadding.PaddingBottom = UDim.new(0, 5)
+	msgPadding.PaddingLeft = UDim.new(0, 8)
+	msgPadding.PaddingRight = UDim.new(0, 8)
+	msgPadding.Parent = msgFrame
+	
+	local typeColor = isHidden and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100)
+	local typeIcon = isHidden and "🔒" or "💬"
+	local typeText = isHidden and "HIDDEN" or "PUBLIC"
+	
+	local timeLabel = Instance.new("TextLabel")
+	timeLabel.Name = "Time"
+	timeLabel.Size = UDim2.new(0, 45, 0, 14)
+	timeLabel.Position = UDim2.new(0, 0, 0, 0)
+	timeLabel.BackgroundTransparency = 1
+	timeLabel.Text = os.date("%H:%M")
+	timeLabel.TextColor3 = customTheme.TextDim
+	timeLabel.TextSize = 10
+	timeLabel.Font = Enum.Font.Gotham
+	timeLabel.TextXAlignment = Enum.TextXAlignment.Left
+	timeLabel.Parent = msgFrame
+	
+	local typeBadge = Instance.new("TextLabel")
+	typeBadge.Name = "TypeBadge"
+	typeBadge.Size = UDim2.new(0, 60, 0, 14)
+	typeBadge.Position = UDim2.new(0, 48, 0, 0)
+	typeBadge.BackgroundColor3 = typeColor
+	typeBadge.BackgroundTransparency = 0.7
+	typeBadge.Text = typeText
+	typeBadge.TextColor3 = typeColor
+	typeBadge.TextSize = 9
+	typeBadge.Font = Enum.Font.GothamBold
+	typeBadge.Parent = msgFrame
+	
+	local typeBadgeCorner = Instance.new("UICorner")
+	typeBadgeCorner.CornerRadius = UDim.new(0, 3)
+	typeBadgeCorner.Parent = typeBadge
+	
+	local senderLabel = Instance.new("TextLabel")
+	senderLabel.Name = "Sender"
+	senderLabel.Size = UDim2.new(1, -115, 0, 14)
+	senderLabel.Position = UDim2.new(0, 115, 0, 0)
+	senderLabel.BackgroundTransparency = 1
+	senderLabel.Text = typeIcon .. " " .. sender
+	senderLabel.TextColor3 = typeColor
+	senderLabel.TextSize = 11
+	senderLabel.Font = Enum.Font.GothamBold
+	senderLabel.TextXAlignment = Enum.TextXAlignment.Left
+	senderLabel.TextTruncate = Enum.TextTruncate.AtEnd
+	senderLabel.Parent = msgFrame
+	
+	local messageLabel = Instance.new("TextLabel")
+	messageLabel.Name = "MessageText"
+	messageLabel.Size = UDim2.new(1, 0, 0, 0)
+	messageLabel.Position = UDim2.new(0, 0, 0, 18)
+	messageLabel.AutomaticSize = Enum.AutomaticSize.Y
+	messageLabel.BackgroundTransparency = 1
+	messageLabel.Text = message
+	messageLabel.TextColor3 = customTheme.Text
+	messageLabel.TextSize = 12
+	messageLabel.Font = Enum.Font.Gotham
+	messageLabel.TextXAlignment = Enum.TextXAlignment.Left
+	messageLabel.TextWrapped = true
+	messageLabel.Parent = msgFrame
+	
+	msgFrame.Parent = chatSpyScrollFrame
+	
+	table.insert(chatSpyMessages, msgFrame)
+	
+	local msgCountLabel = chatSpyFrame:FindFirstChild("Header"):FindFirstChild("MsgCount")
+	if msgCountLabel then
+		msgCountLabel.Text = tostring(#chatSpyMessages)
+	end
+	
+	if #chatSpyMessages > maxChatSpyMessages then
+		local oldMsg = table.remove(chatSpyMessages, 1)
+		if oldMsg then oldMsg:Destroy() end
+	end
+	
+	task.defer(function()
+		chatSpyScrollFrame.CanvasPosition = Vector2.new(0, chatSpyScrollFrame.AbsoluteCanvasSize.Y)
+	end)
+	
+	msgFrame.BackgroundTransparency = 1
+	TweenService:Create(msgFrame, TweenInfo.new(0.3), {BackgroundTransparency = 0}):Play()
+end
+
+local function setupChatSpy()
+	for _, conn in ipairs(chatSpyConnections) do
+		pcall(function() conn:Disconnect() end)
+	end
+	chatSpyConnections = {}
+	
+	createChatSpyUI()
+	
+	chatSpyInstance = chatSpyInstance + 1
+	local currentInstance = chatSpyInstance
+	
+	local saymsg = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+	local getmsg = saymsg and saymsg:FindFirstChild("OnMessageDoneFiltering")
+	
+	if not getmsg then
+		pcall(function()
+			saymsg = ReplicatedStorage:WaitForChild("DefaultChatSystemChatEvents", 5)
+			if saymsg then
+				getmsg = saymsg:WaitForChild("OnMessageDoneFiltering", 5)
+			end
+		end)
+	end
+	
+	local function onChatted(player, msg)
+		if currentInstance ~= chatSpyInstance then return end
+		if not chatSpyEnabled then return end
+		if not spyOnMyself and player == LocalPlayer then return end
+		
+		msg = msg:gsub("[\n\r]", ''):gsub("\t", ' '):gsub("[ ]+", ' ')
+		
+		local hidden = true
+		
+		if getmsg then
+			local conn
+			conn = getmsg.OnClientEvent:Connect(function(packet, channel)
+				if packet.SpeakerUserId == player.UserId then
+					if packet.Message == msg:sub(#msg - #packet.Message + 1) then
+						if channel == "All" then
+							hidden = false
+						elseif channel == "Team" then
+							local teamPlayer = Players:FindFirstChild(packet.FromSpeaker)
+							if teamPlayer and teamPlayer.Team == LocalPlayer.Team then
+								hidden = false
+							end
+						end
+					end
+				end
+			end)
+			
+			task.wait(1)
+			conn:Disconnect()
+		end
+		
+		if chatSpyEnabled and currentInstance == chatSpyInstance then
+			addChatSpyMessage(player.Name, msg, hidden)
+			
+			if hidden then
+				pcall(function()
+					StarterGui:SetCore("ChatMakeSystemMessage", {
+						Text = "[SPY] " .. player.Name .. ": " .. msg,
+						Color = Color3.fromRGB(255, 200, 0),
+						Font = Enum.Font.SourceSansBold,
+						TextSize = 18
+					})
+				end)
+			end
+		end
+	end
+	
+	for _, player in ipairs(Players:GetPlayers()) do
+		local conn = player.Chatted:Connect(function(msg)
+			onChatted(player, msg)
+		end)
+		table.insert(chatSpyConnections, conn)
+	end
+	
+	local playerAddedConn = Players.PlayerAdded:Connect(function(player)
+		local conn = player.Chatted:Connect(function(msg)
+			onChatted(player, msg)
+		end)
+		table.insert(chatSpyConnections, conn)
+	end)
+	table.insert(chatSpyConnections, playerAddedConn)
+	
+	pcall(function()
+		local channels = TextChatService:FindFirstChild("TextChannels")
+		if channels then
+			local function connectChannel(channel)
+				if not channel:IsA("TextChannel") then return end
+				local conn = channel.MessageReceived:Connect(function(msg)
+					if not chatSpyEnabled then return end
+					if currentInstance ~= chatSpyInstance then return end
+					
+					pcall(function()
+						if msg.TextSource then
+							local player = Players:GetPlayerByUserId(msg.TextSource.UserId)
+							if player and (spyOnMyself or player ~= LocalPlayer) then
+								local channelName = channel.Name
+								if channelName ~= "RBXGeneral" and channelName ~= "RBXSystem" then
+									addChatSpyMessage(player.Name .. " [" .. channelName .. "]", msg.Text, true)
+								end
+							end
+						end
+					end)
+				end)
+				table.insert(chatSpyConnections, conn)
+			end
+			
+			for _, channel in pairs(channels:GetChildren()) do
+				connectChannel(channel)
+			end
+			
+			local addedConn = channels.ChildAdded:Connect(function(channel)
+				task.wait(0.1)
+				connectChannel(channel)
+			end)
+			table.insert(chatSpyConnections, addedConn)
+		end
+	end)
+	
+	addChatSpyMessage("SYSTEM", "Chat Spy enabled - monitoring messages...", false)
+end
+
+local function cleanupChatSpy()
+	for _, conn in ipairs(chatSpyConnections) do
+		pcall(function() conn:Disconnect() end)
+	end
+	chatSpyConnections = {}
+	
+	if chatSpyUI then
+		chatSpyUI:Destroy()
+		chatSpyUI = nil
+		chatSpyFrame = nil
+		chatSpyScrollFrame = nil
+	end
+	
+	chatSpyMessages = {}
+end
 
 local function cleanupFly()
 	flyActive = false
@@ -1072,11 +1801,21 @@ local function cleanupAll()
 	stopFellLoop()
 	disableNoclip()
 	disableAntiFling()
+	cleanupChatSpy()
+	StopTrigger()
 end
 
 local function onCharacterAdded(character)
 	isResetting = true
-	cleanupAll()
+	cleanupFly()
+	cleanupCFrameSpeed()
+	cleanupWalkSpeed()
+	cleanupJumpPower()
+	stop360Spin()
+	stopFellLoop()
+	disableNoclip()
+	disableAntiFling()
+	StopTrigger()
 	isMouseHeld = false
 	if Silent.Active then
 		UnblockGunInput()
@@ -1117,6 +1856,12 @@ local function onCharacterAdded(character)
 	if antiflingEnabled then
 		enableAntiFling()
 	end
+	if infiniteZoomEnabled then
+		enableInfiniteZoom()
+	end
+	if Trigger.Active then
+		StartTrigger()
+	end
 	if Silent.Active then
 		if Silent.CharacterConnection then
 			Silent.CharacterConnection:Disconnect()
@@ -1133,7 +1878,15 @@ local function onCharacterAdded(character)
 		end
 	end
 	humanoid.Died:Connect(function()
-		cleanupAll()
+		cleanupFly()
+		cleanupCFrameSpeed()
+		cleanupWalkSpeed()
+		cleanupJumpPower()
+		stop360Spin()
+		stopFellLoop()
+		disableNoclip()
+		disableAntiFling()
+		StopTrigger()
 	end)
 end
 
@@ -1347,6 +2100,45 @@ SilentSection:AddSlider({
 	Round = 0,
 	Callback = function(v) Silent.AutoPredictionDivisor = v end,
 	Flag = "SilentAutoPredDivisor"
+})
+
+local TriggerSection = Legit:AddSection({ Name = "Triggerbot", Side = "right", ShowTitle = true, Height = 0 })
+
+local TriggerToggle = TriggerSection:AddToggle({
+	Name = "Enabled",
+	Default = false,
+	Option = true,
+	Callback = function(v)
+		Trigger.Active = v
+		if v then
+			StartTrigger()
+		else
+			StopTrigger()
+		end
+	end,
+	Flag = "TriggerEnabled"
+})
+
+if TriggerToggle.Option then
+	TriggerToggle.Option:AddKeybind({
+		Name = "Keybind",
+		Default = nil,
+		Callback = function() end,
+		Flag = "TriggerKeybind"
+	})
+end
+
+TriggerSection:AddSlider({
+	Name = "Min Delay",
+	Type = "ms",
+	Default = 50,
+	Min = 0,
+	Max = 200,
+	Round = 0,
+	Callback = function(v) 
+		Trigger.MinDelay = v / 1000
+	end,
+	Flag = "TriggerMinDelay"
 })
 
 local FOVVisualsSection = Visuals:AddSection({ Name = "FOV Circles", Side = "left", ShowTitle = true, Height = 0 })
@@ -1623,6 +2415,36 @@ Character:AddToggle({
 		end
 	end,
 	Flag = "AntiFlingEnabled"
+})
+
+Character:AddToggle({
+	Name = "Infinite Zoom",
+	Default = false,
+	Option = false,
+	Callback = function(enabled)
+		infiniteZoomEnabled = enabled
+		if enabled then
+			enableInfiniteZoom()
+		else
+			disableInfiniteZoom()
+		end
+	end,
+	Flag = "InfiniteZoomEnabled"
+})
+
+Character:AddToggle({
+	Name = "Chat Spy",
+	Default = false,
+	Option = false,
+	Callback = function(enabled)
+		chatSpyEnabled = enabled
+		if enabled then
+			setupChatSpy()
+		else
+			cleanupChatSpy()
+		end
+	end,
+	Flag = "ChatSpyEnabled"
 })
 
 local UI = Settings:AddSection({ Name = "UI", Side = "left", ShowTitle = true, Height = 0 })

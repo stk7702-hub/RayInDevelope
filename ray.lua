@@ -61,7 +61,6 @@ local Aimbot = {
 }
 
 local CameraLock = {
-	Enabled = false,
 	Active = false,
 	FOV = 100,
 	Smoothness = 0.1,
@@ -84,7 +83,6 @@ local Silent = {
 }
 
 local Trigger = {
-	Enabled = false,
 	Active = false,
 	Connection = nil,
 	LastShot = 0,
@@ -98,7 +96,6 @@ local Trigger = {
 local PREDICTION_BASE = 0.095
 local PREDICTION_TAU = 0.15
 local SERVER_TICK_INTERVAL = 1/60
-local VELOCITY_SMOOTH_ALPHA = 0.4
 local VELOCITY_MAX_MAGNITUDE = 150
 local JUMP_STATE_OFFSET_MULTIPLIER = 1.0
 
@@ -113,17 +110,13 @@ local cachedPing = 100
 local ESP = {
 	ShowCameraLockFOV = true,
 	ShowSilentFOV = true,
-	ShowTriggerFOV = true,
 	CameraLockFOVColor = Color3.fromRGB(255, 255, 255),
 	SilentFOVColor = Color3.fromRGB(0, 255, 255),
-	TriggerFOVColor = Color3.fromRGB(255, 165, 0),
 	LockedColor = Color3.fromRGB(255, 70, 70),
 	CameraLockCircle = nil,
 	SilentCircle = nil,
-	TriggerCircle = nil,
 }
 
-local movementKeys = {w = false, a = false, s = false, d = false}
 local isResetting = false
 local menuOpen = true
 local menuToggleKey = Enum.KeyCode.Insert
@@ -186,6 +179,19 @@ local noclipConnection = nil
 local antiflingEnabled = false
 local antiflingConnection = nil
 
+-- Bunny Hop
+local bunnyHopEnabled = false
+local bunnyHopSpeed = 50
+local bunnyHopConnection = nil
+
+-- Character utilities
+local noSlowEnabled = false
+local noSlowConnection = nil
+local noJumpCooldownEnabled = false
+local noJumpCooldownConnection = nil
+local noSeatEnabled = false
+local noSeatConnection = nil
+
 local infiniteZoomEnabled = false
 local defaultMaxZoom = 128
 local defaultMinZoom = 0.5
@@ -214,16 +220,6 @@ end
 
 local function calculateCFrameSpeed(sliderValue)
 	return CFRAME_MIN_SPEED + (sliderValue / 100) * (CFRAME_MAX_SPEED - CFRAME_MIN_SPEED)
-end
-
-local function getCurrentTarget()
-	if CameraLock.Active and CameraLock.CurrentTarget then
-		return CameraLock.CurrentTarget
-	end
-	if Silent.Enabled and Silent.CurrentTarget then
-		return Silent.CurrentTarget
-	end
-	return nil
 end
 
 local function GetCharacterParts(player)
@@ -498,42 +494,40 @@ local function IsNoSilentWeapon(gun)
 	return NO_SILENT_WEAPONS[gunName] == true
 end
 
-local function CanShootSilent()
+local function CanShoot(forSilent)
 	local char, hum = GetCharacterParts()
 	if not char or not hum then return false, nil end
+	
 	local gun = GetEquippedGun()
 	if not gun then return false, nil end
-	if IsMeleeWeapon(gun) then return false, nil end
-	if IsNoSilentWeapon(gun) then return false, nil end
+	
+	-- Проверки только для Silent
+	if forSilent then
+		if IsMeleeWeapon(gun) then return false, nil end
+		if IsNoSilentWeapon(gun) then return false, nil end
+	end
+	
 	local ammo = gun:FindFirstChild("Ammo")
 	if ammo and ammo.Value <= 0 then return false, nil end
+	
 	local bodyEffects = char:FindFirstChild("BodyEffects")
 	if not bodyEffects then return false, nil end
+	
 	if bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then return false, nil end
 	if bodyEffects:FindFirstChild("Dead") and bodyEffects.Dead.Value then return false, nil end
 	if bodyEffects:FindFirstChild("Reload") and bodyEffects.Reload.Value then return false, nil end
-	return true, gun
-end
-
-local function CanShoot()
-	local char, hum = GetCharacterParts()
-	if not char or not hum then return false, nil end
-	local gun = GetEquippedGun()
-	if not gun then return false, nil end
-	local ammo = gun:FindFirstChild("Ammo")
-	if ammo and ammo.Value <= 0 then return false, nil end
-	local bodyEffects = char:FindFirstChild("BodyEffects")
-	if not bodyEffects then return false, nil end
-	if bodyEffects:FindFirstChild("Cuff") and bodyEffects.Cuff.Value then return false, nil end
-	if bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then return false, nil end
-	if bodyEffects:FindFirstChild("Reload") and bodyEffects.Reload.Value then return false, nil end
-	if bodyEffects:FindFirstChild("Dead") and bodyEffects.Dead.Value then return false, nil end
-	if bodyEffects:FindFirstChild("Attacking") and bodyEffects.Attacking.Value then return false, nil end
-	if bodyEffects:FindFirstChild("Grabbed") and bodyEffects.Grabbed.Value then return false, nil end
-	if gun:GetAttribute("Cooldown") then return false, nil end
-	if char:FindFirstChild("FORCEFIELD") then return false, nil end
-	if not char:FindFirstChild("FULLY_LOADED_CHAR") then return false, nil end
-	if char:FindFirstChild("GRABBING_CONSTRAINT") then return false, nil end
+	
+	-- Дополнительные проверки НЕ для Silent
+	if not forSilent then
+		if bodyEffects:FindFirstChild("Cuff") and bodyEffects.Cuff.Value then return false, nil end
+		if bodyEffects:FindFirstChild("Attacking") and bodyEffects.Attacking.Value then return false, nil end
+		if bodyEffects:FindFirstChild("Grabbed") and bodyEffects.Grabbed.Value then return false, nil end
+		if gun:GetAttribute("Cooldown") then return false, nil end
+		if char:FindFirstChild("FORCEFIELD") then return false, nil end
+		if not char:FindFirstChild("FULLY_LOADED_CHAR") then return false, nil end
+		if char:FindFirstChild("GRABBING_CONSTRAINT") then return false, nil end
+	end
+	
 	return true, gun
 end
 
@@ -548,7 +542,7 @@ local OriginalNamecall = nil
 -- ФУНКЦИИ ПОЛУЧЕНИЯ ЦЕЛИ И ПОЗИЦИИ (ИСПРАВЛЕННЫЕ)
 -- =====================================================
 
-local DEBUG_SILENT = true -- true для дебага (выключить после проверки)
+local DEBUG_SILENT = false
 
 local function DebugPrint(...)
 	if DEBUG_SILENT then
@@ -795,102 +789,52 @@ local function GetWeaponFireRate(gun)
 end
 
 local function TriggerShoot()
-	-- Проверка задержки между выстрелами
 	local currentTime = tick()
 	if currentTime - Trigger.LastShot < Trigger.Delay then
 		return
 	end
 	
 	local target = GetTriggerTarget()
+	local canShootResult, gun = CanShoot(Silent.Enabled)
 	
-	-- Получаем оружие в зависимости от состояния сайлента
-	local gun = nil
-	if Silent.Enabled then
-		local canShootResult, gunResult = CanShootSilent()
-		if not canShootResult or not gunResult then 
-			-- Если не можем стрелять, сбрасываем состояние если цель изменилась
-			if target ~= Trigger.LastTarget then
-				Trigger.HasShotTarget = false
-				Trigger.LastTarget = target
-			end
-			return 
+	if not canShootResult or not gun then
+		if target ~= Trigger.LastTarget then
+			Trigger.HasShotTarget = false
+			Trigger.LastTarget = target
 		end
-		gun = gunResult
-	else
-		local canShootResult, gunResult = CanShoot()
-		if not canShootResult or not gunResult then 
-			-- Если не можем стрелять, сбрасываем состояние если цель изменилась
-			if target ~= Trigger.LastTarget then
-				Trigger.HasShotTarget = false
-				Trigger.LastTarget = target
-			end
-			return 
-		end
-		gun = gunResult
+		return
 	end
 	
-	-- Сбрасываем флаг если цель сменилась или стала nil
 	if target ~= Trigger.LastTarget then
 		Trigger.HasShotTarget = false
 		Trigger.LastTarget = target
 	end
 	
-	-- Сбрасываем флаг если оружие сменилось
 	if gun ~= Trigger.LastGun then
 		Trigger.HasShotTarget = false
 		Trigger.LastGun = gun
 	end
 	
-	-- Если нет цели, выходим (состояние уже сброшено выше)
-	if not target then
-		return
-	end
+	if not target then return end
 	
-	-- Для полуавтоматического оружия проверяем, не стреляли ли мы уже по этой цели
 	local isSemiAuto = not CanHoldFire(gun)
 	if isSemiAuto and Trigger.HasShotTarget and target == Trigger.LastTarget then
-		-- Уже стреляли по этой цели полуавтоматом, пропускаем
 		return
 	end
 	
-	-- Устанавливаем задержку на основе скорострельности оружия
-	local fireRate = GetWeaponFireRate(gun)
-	Trigger.Delay = math.max(fireRate + 0.02, Trigger.MinDelay)
+	Trigger.Delay = math.max(GetWeaponFireRate(gun) + 0.02, Trigger.MinDelay)
 	
-	local shotSuccess = false
+	local shotSuccess = pcall(function()
+		if mouse1click then
+			mouse1click()
+		end
+	end)
 	
-	if Silent.Enabled then
-		-- Когда сайлент активен, хуки сами обработают выстрел
-		-- Просто отправляем обычный клик, хуки подменят данные
-		pcall(function()
-			if mouse1click then
-				mouse1click()
-				Trigger.LastShot = currentTime
-				shotSuccess = true
-			end
-		end)
-	else
-		-- Когда сайлент не активен, используем обычный клик
-		pcall(function()
-			if mouse1click then
-				mouse1click()
-				Trigger.LastShot = currentTime
-				shotSuccess = true
-			end
-		end)
-	end
-	
-	-- После успешного выстрела обновляем состояние
 	if shotSuccess then
+		Trigger.LastShot = currentTime
 		Trigger.LastTarget = target
 		Trigger.LastGun = gun
-		-- Для полуавтомата устанавливаем флаг, что уже стреляли по этой цели
-		if isSemiAuto then
-			Trigger.HasShotTarget = true
-		else
-			-- Для автоматического оружия сбрасываем флаг, чтобы стрелять непрерывно
-			Trigger.HasShotTarget = false
-		end
+		Trigger.HasShotTarget = isSemiAuto
 	end
 end
 
@@ -1007,14 +951,6 @@ local function CreateFOVCircles()
 		ESP.SilentCircle.Visible = false
 		ESP.SilentCircle.Transparency = 0.7
 	end
-	if not ESP.TriggerCircle then
-		ESP.TriggerCircle = Drawing.new("Circle")
-		ESP.TriggerCircle.Thickness = 1
-		ESP.TriggerCircle.NumSides = 64
-		ESP.TriggerCircle.Filled = false
-		ESP.TriggerCircle.Visible = false
-		ESP.TriggerCircle.Transparency = 0.7
-	end
 end
 
 local function UpdateFOVCircles()
@@ -1048,10 +984,6 @@ local function UpdateFOVCircles()
 		else
 			ESP.SilentCircle.Color = ESP.SilentFOVColor
 		end
-	end
-	if ESP.TriggerCircle then
-		-- Триггер работает через raycast или FOV сайлента
-		ESP.TriggerCircle.Visible = false
 	end
 end
 
@@ -1590,19 +1522,24 @@ end
 
 local function startFly()
 	if flyActive then return end
-	if cframeSpeedActive or cframeSpeedEnabled then
-		cleanupCFrameSpeed()
-		cframeSpeedEnabled = false
-		if UIElements.CFrameSpeedToggle then
-			UIElements.CFrameSpeedToggle:SetValue(false)
-		end
-		if UIElements.CFrameSpeedSlider then
-			UIElements.CFrameSpeedSlider:SetVisible(false)
-		end
-	end
+	
 	local character, humanoid, rootPart = GetCharacterParts()
 	if not character then return end
+	
 	flyActive = true
+	
+	-- Приостанавливаем CFrame Speed и BunnyHop (но НЕ выключаем enabled)
+	if cframeSpeedConnection then
+		cframeSpeedConnection:Disconnect()
+		cframeSpeedConnection = nil
+	end
+	cframeSpeedActive = false
+	
+	if bunnyHopConnection then
+		bunnyHopConnection:Disconnect()
+		bunnyHopConnection = nil
+	end
+	
 	flyConnection = RunService.Heartbeat:Connect(function()
 		if not flyEnabled or not flyActive then return end
 		local char, hum, root = GetCharacterParts()
@@ -1635,36 +1572,35 @@ end
 
 local function stopFly()
 	cleanupFly()
+	
+	-- Возобновляем CFrame Speed и BunnyHop если они включены
+	if cframeSpeedEnabled and not cframeSpeedActive then
+		startCFrameSpeed()
+	end
+	if bunnyHopEnabled and not bunnyHopConnection then
+		startBunnyHop()
+	end
 end
 
 local function startCFrameSpeed()
 	if cframeSpeedActive then return end
-	if flyEnabled or flyActive then
-		cframeSpeedEnabled = false
-		if UIElements.CFrameSpeedToggle then
-			UIElements.CFrameSpeedToggle:SetValue(false)
-		end
-		if UIElements.CFrameSpeedSlider then
-			UIElements.CFrameSpeedSlider:SetVisible(false)
-		end
-		return
-	end
+	
+	-- Не запускаем если Fly активен
+	if flyEnabled and flyActive then return end
+	
 	local character, humanoid, rootPart = GetCharacterParts()
 	if not character then return end
+	
 	cframeSpeedActive = true
 	cframeSpeedConnection = RunService.Stepped:Connect(function()
 		if not cframeSpeedEnabled or not cframeSpeedActive then return end
-		if flyEnabled or flyActive then
+		
+		-- Проверяем приоритет Fly
+		if flyEnabled and flyActive then
 			cleanupCFrameSpeed()
-			cframeSpeedEnabled = false
-			if UIElements.CFrameSpeedToggle then
-				UIElements.CFrameSpeedToggle:SetValue(false)
-			end
-			if UIElements.CFrameSpeedSlider then
-				UIElements.CFrameSpeedSlider:SetVisible(false)
-			end
 			return
 		end
+		
 		local char, hum, root = GetCharacterParts()
 		if not char or not root or not hum then
 			cleanupCFrameSpeed()
@@ -1811,6 +1747,148 @@ local function disableAntiFling()
 	end
 end
 
+-- =====================================================
+-- BUNNY HOP
+-- =====================================================
+
+local function startBunnyHop()
+	if bunnyHopConnection then return end
+	
+	-- Не запускаем если Fly активен
+	if flyEnabled and flyActive then return end
+	
+	bunnyHopConnection = RunService.Stepped:Connect(function()
+		if not bunnyHopEnabled then return end
+		
+		-- Проверяем приоритет Fly
+		if flyEnabled and flyActive then
+			if bunnyHopConnection then
+				bunnyHopConnection:Disconnect()
+				bunnyHopConnection = nil
+			end
+			return
+		end
+		
+		local character, humanoid, rootPart = GetCharacterParts()
+		if not character or not humanoid or not rootPart then return end
+		
+		if humanoid.FloorMaterial == Enum.Material.Air then
+			local moveDirection = humanoid.MoveDirection
+			if moveDirection.Magnitude > 0 then
+				rootPart.CFrame = rootPart.CFrame + moveDirection * (bunnyHopSpeed / 100)
+			end
+		end
+	end)
+end
+
+local function stopBunnyHop()
+	if bunnyHopConnection then
+		bunnyHopConnection:Disconnect()
+		bunnyHopConnection = nil
+	end
+end
+
+-- =====================================================
+-- NO SLOW
+-- =====================================================
+
+local function enableNoSlow()
+	if noSlowConnection then return end
+	noSlowConnection = RunService.Stepped:Connect(function()
+		if not noSlowEnabled then return end
+		local character = LocalPlayer.Character
+		if not character then return end
+		
+		local bodyEffects = character:FindFirstChild("BodyEffects")
+		if bodyEffects then
+			-- Удаляем все эффекты замедления
+			local movement = bodyEffects:FindFirstChild("Movement")
+			if movement then
+				for _, effect in pairs(movement:GetChildren()) do
+					effect:Destroy()
+				end
+			end
+			
+			-- Отключаем замедление при перезарядке
+			local reload = bodyEffects:FindFirstChild("Reload")
+			if reload and reload:IsA("BoolValue") then
+				reload.Value = false
+			end
+		end
+	end)
+end
+
+local function disableNoSlow()
+	if noSlowConnection then
+		noSlowConnection:Disconnect()
+		noSlowConnection = nil
+	end
+end
+
+-- =====================================================
+-- NO JUMP COOLDOWN
+-- =====================================================
+
+local function enableNoJumpCooldown()
+	if noJumpCooldownConnection then return end
+	noJumpCooldownConnection = RunService.Stepped:Connect(function()
+		if not noJumpCooldownEnabled then return end
+		local character, humanoid = GetCharacterParts()
+		if not humanoid then return end
+		
+		-- Отключаем UseJumpPower чтобы убрать кулдаун
+		humanoid.UseJumpPower = false
+	end)
+end
+
+local function disableNoJumpCooldown()
+	if noJumpCooldownConnection then
+		noJumpCooldownConnection:Disconnect()
+		noJumpCooldownConnection = nil
+	end
+	
+	-- Восстанавливаем стандартное поведение
+	local character, humanoid = GetCharacterParts()
+	if humanoid then
+		humanoid.UseJumpPower = true
+	end
+end
+
+-- =====================================================
+-- NO SEAT
+-- =====================================================
+
+local function setSeatsDisabled(disabled)
+	for _, obj in pairs(workspace:GetDescendants()) do
+		if obj:IsA("Seat") or obj:IsA("VehicleSeat") then
+			obj.Disabled = disabled
+		end
+	end
+end
+
+local function enableNoSeat()
+	setSeatsDisabled(true)
+	
+	-- Очищаем старый connection если есть
+	if noSeatConnection then
+		noSeatConnection:Disconnect()
+	end
+	
+	noSeatConnection = workspace.DescendantAdded:Connect(function(obj)
+		if noSeatEnabled and (obj:IsA("Seat") or obj:IsA("VehicleSeat")) then
+			obj.Disabled = true
+		end
+	end)
+end
+
+local function disableNoSeat()
+	setSeatsDisabled(false)
+	if noSeatConnection then
+		noSeatConnection:Disconnect()
+		noSeatConnection = nil
+	end
+end
+
 local function resetCharacterStats()
 	local character, humanoid = GetCharacterParts()
 	if not humanoid then return end
@@ -1833,6 +1911,9 @@ local function cleanupAll()
 	disableAntiFling()
 	cleanupChatSpy()
 	StopTrigger()
+	stopBunnyHop()
+	disableNoSlow()
+	disableNoJumpCooldown()
 end
 
 local function onCharacterAdded(character)
@@ -1845,14 +1926,18 @@ local function onCharacterAdded(character)
 	stopFellLoop()
 	disableNoclip()
 	disableAntiFling()
+	stopBunnyHop()
+	disableNoSlow()
+	disableNoJumpCooldown()
 	StopTrigger()
 	if Silent.Enabled then
-		DisableSilent()
+		StopSilentUpdate()
 	end
 	previousPositions = {}
 	smoothedVelocities = {}
 	lastUpdateTimes = {}
 	accelerationCache = {}
+	
 	local humanoid = character:WaitForChild("Humanoid", 10)
 	if not humanoid then
 		isResetting = false
@@ -1861,11 +1946,20 @@ local function onCharacterAdded(character)
 	character:WaitForChild("HumanoidRootPart", 10)
 	task.wait(0.5)
 	isResetting = false
+	
+	-- Приоритет: сначала Fly, потом остальные
 	if flyEnabled then
 		startFly()
-	elseif cframeSpeedEnabled then
-		startCFrameSpeed()
+	else
+		-- Fly не включен - можно запустить CFrame Speed и BunnyHop
+		if cframeSpeedEnabled then
+			startCFrameSpeed()
+		end
+		if bunnyHopEnabled then
+			startBunnyHop()
+		end
 	end
+	
 	if walkSpeedEnabled then
 		startWalkSpeedLoop()
 	end
@@ -1883,6 +1977,12 @@ local function onCharacterAdded(character)
 	end
 	if antiflingEnabled then
 		enableAntiFling()
+	end
+	if noSlowEnabled then
+		enableNoSlow()
+	end
+	if noJumpCooldownEnabled then
+		enableNoJumpCooldown()
 	end
 	if infiniteZoomEnabled then
 		enableInfiniteZoom()
@@ -1908,30 +2008,8 @@ local function onCharacterAdded(character)
 end
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
-	if input.KeyCode == menuToggleKey then
+	if not gameProcessed and input.KeyCode == menuToggleKey then
 		menuOpen = not menuOpen
-	end
-	if gameProcessed then return end
-	if input.KeyCode == Enum.KeyCode.W then
-		movementKeys.w = true
-	elseif input.KeyCode == Enum.KeyCode.A then
-		movementKeys.a = true
-	elseif input.KeyCode == Enum.KeyCode.S then
-		movementKeys.s = true
-	elseif input.KeyCode == Enum.KeyCode.D then
-		movementKeys.d = true
-	end
-end)
-
-UserInputService.InputEnded:Connect(function(input)
-	if input.KeyCode == Enum.KeyCode.W then
-		movementKeys.w = false
-	elseif input.KeyCode == Enum.KeyCode.A then
-		movementKeys.a = false
-	elseif input.KeyCode == Enum.KeyCode.S then
-		movementKeys.s = false
-	elseif input.KeyCode == Enum.KeyCode.D then
-		movementKeys.d = false
 	end
 end)
 
@@ -2258,15 +2336,6 @@ UIElements.CFrameSpeedToggle = Movement:AddToggle({
 		if isResetting then return end
 		cframeSpeedEnabled = enabled
 		if enabled then
-			if flyEnabled or flyActive then
-				cframeSpeedEnabled = false
-				if UIElements.CFrameSpeedToggle then
-					task.defer(function()
-						UIElements.CFrameSpeedToggle:SetValue(false)
-					end)
-				end
-				return
-			end
 			startCFrameSpeed()
 		else
 			stopCFrameSpeed()
@@ -2282,6 +2351,48 @@ if UIElements.CFrameSpeedToggle.Option then
 		Default = nil,
 		Callback = function(key) end,
 		Flag = "CFrameSpeedKeybind"
+	})
+end
+
+-- Bunny Hop Slider (скрыт по умолчанию)
+UIElements.BunnyHopSlider = Movement:AddSlider({
+	Name = "Hop Speed",
+	Type = "",
+	Default = 50,
+	Min = 1,
+	Max = 100,
+	Round = 0,
+	Callback = function(value)
+		bunnyHopSpeed = value
+	end,
+	Flag = "BunnyHopSpeed"
+})
+UIElements.BunnyHopSlider:SetVisible(false)
+
+-- Bunny Hop Toggle
+UIElements.BunnyHopToggle = Movement:AddToggle({
+	Name = "Bunny Hop",
+	Default = false,
+	Option = true,
+	Callback = function(enabled)
+		if isResetting then return end
+		bunnyHopEnabled = enabled
+		if enabled then
+			startBunnyHop()
+		else
+			stopBunnyHop()
+		end
+		UIElements.BunnyHopSlider:SetVisible(enabled)
+	end,
+	Flag = "BunnyHopEnabled"
+})
+
+if UIElements.BunnyHopToggle.Option then
+	UIElements.BunnyHopToggle.Option:AddKeybind({
+		Name = "Keybind",
+		Default = nil,
+		Callback = function(key) end,
+		Flag = "BunnyHopKeybind"
 	})
 end
 
@@ -2431,6 +2542,51 @@ Character:AddToggle({
 		end
 	end,
 	Flag = "AntiFlingEnabled"
+})
+
+Character:AddToggle({
+	Name = "No Slow",
+	Default = false,
+	Option = false,
+	Callback = function(enabled)
+		noSlowEnabled = enabled
+		if enabled then
+			enableNoSlow()
+		else
+			disableNoSlow()
+		end
+	end,
+	Flag = "NoSlowEnabled"
+})
+
+Character:AddToggle({
+	Name = "No Jump Cooldown",
+	Default = false,
+	Option = false,
+	Callback = function(enabled)
+		noJumpCooldownEnabled = enabled
+		if enabled then
+			enableNoJumpCooldown()
+		else
+			disableNoJumpCooldown()
+		end
+	end,
+	Flag = "NoJumpCooldownEnabled"
+})
+
+Character:AddToggle({
+	Name = "No Seat",
+	Default = false,
+	Option = false,
+	Callback = function(enabled)
+		noSeatEnabled = enabled
+		if enabled then
+			enableNoSeat()
+		else
+			disableNoSeat()
+		end
+	end,
+	Flag = "NoSeatEnabled"
 })
 
 Character:AddToggle({

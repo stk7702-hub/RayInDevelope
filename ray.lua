@@ -565,13 +565,6 @@ function Aimbot:StartCameraLock()
 	self.CameraLock.Connection = Services.RunService.RenderStepped:Connect(function()
 		if not self.CameraLock.Active then return end
 		
-		-- Проверяем открыто ли меню
-		if State.MenuOpen then return end
-		
-		-- Проверяем фокус на TextBox
-		-- Это работает когда пользователь печатает в любом поле ввода
-		if Services.UserInputService:GetFocusedTextBox() then return end
-		
 		local currentTime = tick()
 		local deltaTime = math.clamp(currentTime - self.CameraLock.LastTime, 0.001, 0.1)
 		self.CameraLock.LastTime = currentTime
@@ -724,7 +717,7 @@ end
 -- MOVEMENT MODULE (LOCAL)
 -- =====================================================
 local Movement = {
-	Fly = { Enabled = false, Speed = 50, Connection = nil, Active = false, HoldPosition = nil },
+	Fly = { Enabled = false, Speed = 50, Connection = nil, Active = false },
 	CFrameSpeed = { Enabled = false, Value = 50, Connection = nil, Active = false },
 	BunnyHop = { Enabled = false, Speed = 50, Connection = nil },
 	WalkSpeed = { Enabled = false, Value = 16, Connection = nil },
@@ -738,9 +731,6 @@ function Movement:StartFly()
 	if not char then return end
 	
 	self.Fly.Active = true
-	
-	-- Сохраняем начальную позицию для удержания
-	self.Fly.HoldPosition = root.CFrame
 	
 	if self.CFrameSpeed.Connection then
 		self.CFrameSpeed.Connection:Disconnect()
@@ -761,9 +751,6 @@ function Movement:StartFly()
 			return
 		end
 		
-		-- Отключаем физику персонажа
-		h:ChangeState(Enum.HumanoidStateType.Physics)
-		
 		local cam = workspace.CurrentCamera
 		local moveDir = Vector3.zero
 		local UIS = Services.UserInputService
@@ -773,57 +760,18 @@ function Movement:StartFly()
 		if UIS:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + cam.CFrame.RightVector end
 		if UIS:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - cam.CFrame.RightVector end
 		
-		-- Обнуляем velocity
-		r.AssemblyLinearVelocity = Vector3.zero
-		r.AssemblyAngularVelocity = Vector3.zero
+		if moveDir.Magnitude > 0 then moveDir = moveDir.Unit end
 		
-		if moveDir.Magnitude > 0 then
-			moveDir = moveDir.Unit
-			local speed = Utils.CalculateFlySpeed(self.Fly.Speed)
-			local newPos = r.CFrame.Position + moveDir * speed
-			
-			-- Получаем горизонтальное направление движения для поворота
-			local flatMoveDir = Vector3.new(moveDir.X, 0, moveDir.Z)
-			
-			if flatMoveDir.Magnitude > 0.1 then
-				-- Поворачиваем персонажа в направлении движения
-				r.CFrame = CFrame.lookAt(newPos, newPos + flatMoveDir.Unit)
-			else
-				-- Двигаемся только вверх/вниз - сохраняем текущий поворот
-				local _, yRot, _ = r.CFrame:ToEulerAnglesYXZ()
-				r.CFrame = CFrame.new(newPos) * CFrame.Angles(0, yRot, 0)
-			end
-			
-			self.Fly.HoldPosition = r.CFrame
-		else
-			-- Не двигаемся - держим позицию, но поворачиваем к камере
-			local camLook = cam.CFrame.LookVector
-			local flatLook = Vector3.new(camLook.X, 0, camLook.Z)
-			
-			if flatLook.Magnitude > 0.1 then
-				local pos = self.Fly.HoldPosition and self.Fly.HoldPosition.Position or r.CFrame.Position
-				r.CFrame = CFrame.lookAt(pos, pos + flatLook.Unit)
-				self.Fly.HoldPosition = r.CFrame
-			elseif self.Fly.HoldPosition then
-				r.CFrame = self.Fly.HoldPosition
-			end
-		end
+		r.AssemblyLinearVelocity = Vector3.zero
+		r.CFrame = r.CFrame + moveDir * Utils.CalculateFlySpeed(self.Fly.Speed)
 	end)
 end
 
 function Movement:StopFly()
 	self.Fly.Active = false
-	self.Fly.HoldPosition = nil
-	
 	if self.Fly.Connection then
 		self.Fly.Connection:Disconnect()
 		self.Fly.Connection = nil
-	end
-	
-	-- Восстанавливаем нормальное состояние Humanoid
-	local c, h, r = Utils.GetCharacterParts()
-	if h then
-		h:ChangeState(Enum.HumanoidStateType.GettingUp)
 	end
 	
 	if self.CFrameSpeed.Enabled and not self.CFrameSpeed.Active then
@@ -1165,7 +1113,7 @@ function Character:CleanupAll()
 end
 
 -- =====================================================
--- PLAYER SYSTEM MODULE (LOCAL) - FIXED VERSION
+-- PLAYER SYSTEM MODULE (LOCAL)
 -- =====================================================
 local PlayerSystem = {
 	KnockActive = {},
@@ -1175,7 +1123,6 @@ local PlayerSystem = {
 	SpectatingPlayer = nil,
 	SelectedPlayer = nil,
 	Dropdown = nil,
-	StickConnection = nil, -- Добавлено для хранения connection
 }
 
 function PlayerSystem:GetCombatTool()
@@ -1184,7 +1131,6 @@ function PlayerSystem:GetCombatTool()
 	local hum = char:FindFirstChildOfClass("Humanoid")
 	if not hum then return nil end
 	
-	-- Сначала ищем в руках
 	for _, child in pairs(char:GetChildren()) do
 		if child:IsA("Tool") then
 			if child:FindFirstChild("CombatScript") then return child end
@@ -1194,21 +1140,19 @@ function PlayerSystem:GetCombatTool()
 		end
 	end
 	
-	-- Если нет в руках, ищем в инвентаре
 	local backpack = LocalPlayer.Backpack
 	if backpack then
 		for _, child in pairs(backpack:GetChildren()) do
 			if child:IsA("Tool") then
 				if child:FindFirstChild("CombatScript") then
 					hum:EquipTool(child)
-					-- Увеличим задержку, чтобы сервер успел понять, что предмет в руках
-					task.wait(0.2) 
+					task.wait(0.15)
 					return child
 				end
 				for _, name in ipairs(Config.Weapons.Combat) do
 					if child.Name:upper():find(name:upper()) then
 						hum:EquipTool(child)
-						task.wait(0.2)
+						task.wait(0.15)
 						return child
 					end
 				end
@@ -1218,28 +1162,23 @@ function PlayerSystem:GetCombatTool()
 	return nil
 end
 
--- Исправленная функция удара (использует Activate)
-function PlayerSystem:PerformPunch(tool)
-	if tool and tool.Parent == LocalPlayer.Character then
-		tool:Activate()
-	else
-		local VIM = game:GetService("VirtualInputManager")
-		VIM:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+function PlayerSystem:PerformPunch()
+	if mouse1click then
+		mouse1click()
+	elseif mouse1press and mouse1release then
+		mouse1press()
 		task.wait(0.05)
-		VIM:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+		mouse1release()
 	end
 end
 
--- Исправленная функция сильного удара
-function PlayerSystem:PerformHeavyPunch(tool)
-	if tool and tool.Parent == LocalPlayer.Character then
-		tool:Activate()
-		-- Для Activate задержка внутри функции не обязательна, она будет в цикле
-	else
-		local VIM = game:GetService("VirtualInputManager")
-		VIM:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+function PlayerSystem:PerformHeavyPunch()
+	if mouse1press and mouse1release then
+		mouse1press()
 		task.wait(0.5)
-		VIM:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+		mouse1release()
+	elseif mouse1click then
+		mouse1click()
 	end
 end
 
@@ -1255,21 +1194,6 @@ function PlayerSystem:LookAt(targetPos)
 	end
 end
 
--- Вспомогательная функция для отключения прилипания
-function PlayerSystem:StopStick()
-	if self.StickConnection then
-		self.StickConnection:Disconnect()
-		self.StickConnection = nil
-	end
-	-- Сбрасываем скорость после остановки
-	local char = LocalPlayer.Character
-	local root = char and char:FindFirstChild("HumanoidRootPart")
-	if root then
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
-	end
-end
-
 function PlayerSystem:Knock(target)
 	if not target or self.KnockActive[target] then return end
 	local targetChar = target.Character
@@ -1281,62 +1205,48 @@ function PlayerSystem:Knock(target)
 	
 	self.KnockActive[target] = true
 	
-	-- 1. ЛОГИКА ДВИЖЕНИЯ (Работает постоянно, без пауз)
-	if self.StickConnection then self.StickConnection:Disconnect() end
-	self.StickConnection = Services.RunService.Heartbeat:Connect(function()
-		local tChar = target.Character
-		local mChar = LocalPlayer.Character
-		if not tChar or not mChar then return end
-		
-		local tRoot = tChar:FindFirstChild("HumanoidRootPart")
-		local mRoot = mChar:FindFirstChild("HumanoidRootPart")
-		
-		if tRoot and mRoot then
-			-- Гасим инерцию, чтобы не скользить
-			mRoot.AssemblyLinearVelocity = Vector3.zero
-			mRoot.AssemblyAngularVelocity = Vector3.zero
-			
-			-- Телепортируемся плотно за спину (2.5 стада)
-			local behindPos = tRoot.CFrame * CFrame.new(0, 0, 2.5)
-			mRoot.CFrame = behindPos
-			
-			-- Смотрим на врага
-			local lookPos = Vector3.new(tRoot.Position.X, mRoot.Position.Y, tRoot.Position.Z)
-			mRoot.CFrame = CFrame.lookAt(mRoot.Position, lookPos)
-		end
-	end)
-	
-	-- 2. ЛОГИКА УДАРОВ (Работает в отдельном потоке с паузами)
 	task.spawn(function()
+		local myChar = LocalPlayer.Character
+		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		if not myRoot then self.KnockActive[target] = nil return end
+		
+		local savedPos = myRoot.CFrame
 		local combatTool = self:GetCombatTool()
-		if not combatTool then 
-			self.KnockActive[target] = nil 
-			self:StopStick()
-			return 
-		end
+		if not combatTool then self.KnockActive[target] = nil return end
 		
 		local attackCount = 0
 		while self.KnockActive[target] do
 			targetChar = target.Character
 			if not targetChar or not targetChar.Parent then break end
 			
+			myChar = LocalPlayer.Character
+			myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+			if not myRoot then break end
+			
 			bodyEffects = targetChar:FindFirstChild("BodyEffects")
 			koValue = bodyEffects and bodyEffects:FindFirstChild("K.O")
 			if not koValue or koValue.Value then break end
 			
-			attackCount = attackCount + 1
+			local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+			if not targetRoot then break end
 			
-			-- Передаем combatTool в функции удара
+			local offset = targetRoot.CFrame.LookVector * -3
+			myRoot.CFrame = CFrame.new(targetRoot.Position + offset + Vector3.new(0, 0.5, 0))
+			self:LookAt(targetRoot.Position)
+			
+			task.wait(0.05)
+			attackCount = attackCount + 1
 			if attackCount % 4 == 0 then
-				self:PerformHeavyPunch(combatTool)
-				task.wait(0.35) -- Пауза только для ударов, движение не страдает
+				self:PerformHeavyPunch()
+				task.wait(0.3)
 			else
-				self:PerformPunch(combatTool)
-				task.wait(0.22)
+				self:PerformPunch()
+				task.wait(0.15)
 			end
 		end
 		
-		self:StopStick()
+		task.wait(0.1)
+		if myRoot and myRoot.Parent then myRoot.CFrame = savedPos end
 		self.KnockActive[target] = nil
 	end)
 end
@@ -1348,88 +1258,75 @@ function PlayerSystem:Kill(target)
 	
 	self.KillActive[target] = true
 	
-	-- 1. ЛОГИКА ДВИЖЕНИЯ
-	if self.StickConnection then self.StickConnection:Disconnect() end
-	self.StickConnection = Services.RunService.Heartbeat:Connect(function()
-		local tChar = target.Character
-		local mChar = LocalPlayer.Character
-		if not tChar or not mChar then return end
-		
-		local tRoot = tChar:FindFirstChild("HumanoidRootPart")
-		local mRoot = mChar:FindFirstChild("HumanoidRootPart")
-		
-		if tRoot and mRoot then
-			local be = tChar:FindFirstChild("BodyEffects")
-			local isKO = be and be:FindFirstChild("K.O") and be["K.O"].Value
-			
-			mRoot.AssemblyLinearVelocity = Vector3.zero
-			mRoot.AssemblyAngularVelocity = Vector3.zero
-			
-			if isKO then
-				-- Если враг упал, встаем СВЕРХУ для Stomp
-				mRoot.CFrame = tRoot.CFrame * CFrame.new(0, 3.5, 0)
-			else
-				-- Если враг бегает, липнем к спине
-				mRoot.CFrame = tRoot.CFrame * CFrame.new(0, 0, 2.5)
-				local lookPos = Vector3.new(tRoot.Position.X, mRoot.Position.Y, tRoot.Position.Z)
-				mRoot.CFrame = CFrame.lookAt(mRoot.Position, lookPos)
-			end
-		end
-	end)
-	
-	-- 2. ЛОГИКА АТАКИ
 	task.spawn(function()
+		local myChar = LocalPlayer.Character
+		local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		if not myRoot then self.KillActive[target] = nil return end
+		
+		local savedPos = myRoot.CFrame
 		local combatTool = self:GetCombatTool()
-		if not combatTool then 
-			self.KillActive[target] = nil 
-			self:StopStick()
-			return 
-		end
+		if not combatTool then self.KillActive[target] = nil return end
 		
 		local attackCount = 0
-		
-		-- Фаза ударов
 		while self.KillActive[target] do
 			targetChar = target.Character
 			if not targetChar or not targetChar.Parent then break end
+			
+			myChar = LocalPlayer.Character
+			myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+			if not myRoot then break end
 			
 			local bodyEffects = targetChar:FindFirstChild("BodyEffects")
 			if not bodyEffects then break end
 			
 			local koValue = bodyEffects:FindFirstChild("K.O")
 			local deadValue = bodyEffects:FindFirstChild("Dead")
-			
 			if deadValue and deadValue.Value then break end
-			if koValue and koValue.Value then break end -- Враг нокнут, выходим к фазе добивания
+			if koValue and koValue.Value then break end
 			
+			local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+			if not targetRoot then break end
+			
+			local offset = targetRoot.CFrame.LookVector * -3
+			myRoot.CFrame = CFrame.new(targetRoot.Position + offset + Vector3.new(0, 0.5, 0))
+			self:LookAt(targetRoot.Position)
+			
+			task.wait(0.05)
 			attackCount = attackCount + 1
 			if attackCount % 4 == 0 then
-				self:PerformHeavyPunch(combatTool)
-				task.wait(0.35)
+				self:PerformHeavyPunch()
+				task.wait(0.3)
 			else
-				self:PerformPunch(combatTool)
-				task.wait(0.22)
+				self:PerformPunch()
+				task.wait(0.15)
 			end
 		end
 		
 		task.wait(0.2)
-		
-		-- Фаза добивания (Movement сам поднимет нас вверх благодаря проверке isKO)
 		for i = 1, 15 do
 			if not self.KillActive[target] then break end
 			targetChar = target.Character
 			if not targetChar or not targetChar.Parent then break end
 			
+			myChar = LocalPlayer.Character
+			myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+			if not myRoot then break end
+			
 			local bodyEffects = targetChar:FindFirstChild("BodyEffects")
 			local deadValue = bodyEffects and bodyEffects:FindFirstChild("Dead")
 			if deadValue and deadValue.Value then break end
 			
-			-- Stomp вызывается удаленно, позиция уже задана в Heartbeat
-			MainEvent:FireServer("Stomp")
-			task.wait(0.25)
+			local targetTorso = targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("HumanoidRootPart")
+			if targetTorso then
+				myRoot.CFrame = CFrame.new(targetTorso.Position + Vector3.new(0, 3, 0))
+				task.wait(0.05)
+				MainEvent:FireServer("Stomp")
+				task.wait(0.25)
+			end
 		end
 		
-		self:StopStick()
+		task.wait(0.1)
+		if myRoot and myRoot.Parent then myRoot.CFrame = savedPos end
 		self.KillActive[target] = nil
 	end)
 end
@@ -1445,76 +1342,25 @@ function PlayerSystem:Fling(target)
 	
 	local originalPos = root.CFrame
 	local startTime = tick()
-	local flingDuration = 1.5
 	local noclipConn, flingConn
-	local isFlingActive = true
 	
-	-- Noclip connection
 	noclipConn = Services.RunService.Stepped:Connect(function()
-		if not isFlingActive then return end
 		if char then
 			for _, part in pairs(char:GetDescendants()) do
-				if part:IsA("BasePart") then 
-					part.CanCollide = false 
-				end
+				if part:IsA("BasePart") then part.CanCollide = false end
 			end
 		end
 	end)
 	
-	-- Fling connection
 	flingConn = Services.RunService.Heartbeat:Connect(function()
-		if not isFlingActive then return end
-		
-		-- Проверяем, нужно ли остановить fling
-		local shouldStop = tick() - startTime > flingDuration 
-			or not targetRoot or not targetRoot.Parent 
-			or not root or not root.Parent
-		
-		if shouldStop then
-			isFlingActive = false
-			
-			-- Отключаем connections сначала
-			if noclipConn then 
-				noclipConn:Disconnect() 
-				noclipConn = nil
-			end
-			if flingConn then 
-				flingConn:Disconnect() 
-				flingConn = nil
-			end
-			
-			-- Останавливаем velocity немедленно
-			if root and root.Parent then
-				root.AssemblyLinearVelocity = Vector3.zero
-				root.AssemblyAngularVelocity = Vector3.zero
-			end
-			
-			-- Восстановление в отдельном потоке
-			task.spawn(function()
-				-- Сначала телепортируем на безопасную позицию
-				if root and root.Parent then
-					root.CFrame = originalPos + Vector3.new(0, 5, 0)
-					root.AssemblyLinearVelocity = Vector3.zero
-					root.AssemblyAngularVelocity = Vector3.zero
-				end
-				
-				-- Ждём перед восстановлением коллизии
-				task.wait(0.15)
-				
-				-- Восстанавливаем коллизию
-				if char and char.Parent then
-					for _, part in pairs(char:GetDescendants()) do
-						if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then 
-							part.CanCollide = true 
-						end
-					end
-				end
-			end)
-			return
-		end
-		
-		-- Активный fling
-		if targetRoot and targetRoot.Parent and root and root.Parent then
+		if tick() - startTime > 1.5 or not targetRoot.Parent or not root.Parent then
+			noclipConn:Disconnect()
+			flingConn:Disconnect()
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+			task.wait(0.1)
+			if root.Parent then root.CFrame = originalPos + Vector3.new(0, 5, 0) end
+		else
 			root.CFrame = targetRoot.CFrame
 			root.AssemblyLinearVelocity = Vector3.new(9e5, 9e5, 9e5)
 			root.AssemblyAngularVelocity = Vector3.new(9e5, 9e5, 9e5)
@@ -1588,7 +1434,6 @@ function PlayerSystem:StopAutoKill()
 	self.AutoKillTargets = {}
 	for p in pairs(self.KillActive) do self.KillActive[p] = nil end
 	for p in pairs(self.KnockActive) do self.KnockActive[p] = nil end
-	self:StopStick() -- На всякий случай останавливаем липучку
 end
 
 function PlayerSystem:GetPlayerNames()
@@ -1670,6 +1515,12 @@ end
 LocalPlayer.CharacterAdded:Connect(OnCharacterAdded)
 if LocalPlayer.Character then task.spawn(function() OnCharacterAdded(LocalPlayer.Character) end) end
 
+Services.UserInputService.InputBegan:Connect(function(input, gpe)
+	if not gpe and input.KeyCode == State.MenuToggleKey then
+		State.MenuOpen = not State.MenuOpen
+	end
+end)
+
 Services.Players.PlayerAdded:Connect(function()
 	task.wait(0.5)
 	PlayerSystem:RefreshDropdown()
@@ -1711,12 +1562,6 @@ local Menus = {
 	Players = Window:AddMenu({ Name = "Players", Icon = "users", AutoFill = false }),
 	Settings = Window:AddMenu({ Name = "Settings", Icon = "settings", AutoFill = false }),
 }
-
--- Синхронизация State.MenuOpen с состоянием меню из UI библиотеки
-State.MenuOpen = Window.Toggle
-Window.Signal.Event:Connect(function(isOpen)
-	State.MenuOpen = isOpen
-end)
 
 -- LEGIT TAB
 do
@@ -1968,20 +1813,158 @@ end
 
 -- SETTINGS TAB
 do
-	local UISection = Menus.Settings:AddSection({ Name = "UI", Side = "left", ShowTitle = true, Height = 0 })
-	UISection:AddKeybind({ Name = "Toggle Menu", Default = Enum.KeyCode.Insert, Flag = "ToggleMenu",
+	local UI = Menus.Settings:AddSection({ Name = "UI", Side = "left", ShowTitle = true, Height = 0 })
+
+	UI:AddKeybind({
+		Name = "Toggle Menu",
+		Default = Enum.KeyCode.Insert,
+		Option = false,
+		Flag = "ToggleMenu",
 		Callback = function(key)
 			if typeof(key) == "EnumItem" then
 				State.MenuToggleKey = key
 				Window:SetToggleKeybind(key)
+			elseif typeof(key) == "string" then
+				pcall(function()
+					State.MenuToggleKey = Enum.KeyCode[key]
+					Window:SetToggleKeybind(Enum.KeyCode[key])
+				end)
 			end
-		end })
-	UISection:AddColorPicker({ Name = "Background", Default = Config.Theme.Background, Flag = "MainColor",
-		Callback = function(c) Window:SetTheme({ Background = c, Panel = c }) end })
-	UISection:AddColorPicker({ Name = "Accent", Default = Config.Theme.Accent, Flag = "AccentColor",
-		Callback = function(c) Window:SetTheme({ Accent = c, SliderAccent = c, ToggleAccent = c, TabSelected = c, ProfileStroke = c }) end })
-	UISection:AddColorPicker({ Name = "Text", Default = Config.Theme.Text, Flag = "TextColor",
-		Callback = function(c) Window:SetTheme({ Text = c }) end })
+		end
+	})
+
+	UI:AddColorPicker({
+		Name = "Background",
+		Default = Config.Theme.Background,
+		Callback = function(c)
+			Window:SetTheme({ Background = c, Panel = c })
+		end,
+		Flag = "MainColor"
+	})
+
+	UI:AddColorPicker({
+		Name = "Accent",
+		Default = Config.Theme.Accent,
+		Callback = function(c)
+			Window:SetTheme({
+				Accent = c,
+				SliderAccent = c,
+				ToggleAccent = c,
+				TabSelected = c,
+				ProfileStroke = c
+			})
+		end,
+		Flag = "AccentColor"
+	})
+
+	UI:AddColorPicker({
+		Name = "Text",
+		Default = Config.Theme.Text,
+		Callback = function(c)
+			Window:SetTheme({ Text = c })
+		end,
+		Flag = "TextColor"
+	})
+
+	UI:AddColorPicker({
+		Name = "Slider",
+		Default = Config.Theme.SliderAccent,
+		Callback = function(c)
+			Window:SetTheme({ SliderAccent = c })
+		end,
+		Flag = "SliderColor"
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Toggle", 
+		Default = Config.Theme.ToggleAccent, 
+		Callback = function(c) Window:SetTheme({ ToggleAccent = c }) end, 
+		Flag = "ToggleColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Tab Selected", 
+		Default = Config.Theme.TabSelected, 
+		Callback = function(c) Window:SetTheme({ TabSelected = c }) end, 
+		Flag = "TabSelectedColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Tab Unselected", 
+		Default = Config.Theme.TabUnselected, 
+		Callback = function(c) Window:SetTheme({ TabUnselected = c }) end, 
+		Flag = "TabUnselectedColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Header", 
+		Default = Config.Theme.Header, 
+		Callback = function(c) Window:SetTheme({ Header = c }) end, 
+		Flag = "HeaderColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Panel", 
+		Default = Config.Theme.Panel, 
+		Callback = function(c) Window:SetTheme({ Panel = c }) end, 
+		Flag = "PanelColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Field", 
+		Default = Config.Theme.Field, 
+		Callback = function(c) Window:SetTheme({ Field = c }) end, 
+		Flag = "FieldColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Stroke", 
+		Default = Config.Theme.Stroke, 
+		Callback = function(c) Window:SetTheme({ Stroke = c }) end, 
+		Flag = "StrokeColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Text Dim", 
+		Default = Config.Theme.TextDim, 
+		Callback = function(c) Window:SetTheme({ TextDim = c }) end, 
+		Flag = "TextDimColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Warning", 
+		Default = Config.Theme.Warning, 
+		Callback = function(c) Window:SetTheme({ Warning = c }) end, 
+		Flag = "WarningColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Shadow", 
+		Default = Config.Theme.Shadow, 
+		Callback = function(c) Window:SetTheme({ Shadow = c }) end, 
+		Flag = "ShadowColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Profile Stroke", 
+		Default = Config.Theme.ProfileStroke, 
+		Callback = function(c) Window:SetTheme({ ProfileStroke = c }) end, 
+		Flag = "ProfileStrokeColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Logo Text", 
+		Default = Config.Theme.LogoText, 
+		Callback = function(c) Window:SetTheme({ LogoText = c }) end, 
+		Flag = "LogoTextColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Username Text", 
+		Default = Config.Theme.UsernameText, 
+		Callback = function(c) Window:SetTheme({ UsernameText = c }) end, 
+		Flag = "UsernameTextColor" 
+	})
 end
 
 print("[RAY] Loaded!")

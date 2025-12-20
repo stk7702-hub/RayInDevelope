@@ -565,6 +565,9 @@ function Aimbot:StartCameraLock()
 	self.CameraLock.Connection = Services.RunService.RenderStepped:Connect(function()
 		if not self.CameraLock.Active then return end
 		
+		-- Если меню открыто - не двигаем камеру, чтобы не мешать пользователю
+		if Window and Window.Toggle then return end
+		
 		local currentTime = tick()
 		local deltaTime = math.clamp(currentTime - self.CameraLock.LastTime, 0.001, 0.1)
 		self.CameraLock.LastTime = currentTime
@@ -1230,8 +1233,8 @@ function PlayerSystem:Knock(target)
 			local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
 			if not targetRoot then break end
 			
-			local offset = targetRoot.CFrame.LookVector * -3
-			myRoot.CFrame = CFrame.new(targetRoot.Position + offset + Vector3.new(0, 0.5, 0))
+			-- Телепортируемся прямо к игроку для максимального шанса попадания
+			myRoot.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, 0.5, 0))
 			self:LookAt(targetRoot.Position)
 			
 			task.wait(0.05)
@@ -1287,8 +1290,8 @@ function PlayerSystem:Kill(target)
 			local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
 			if not targetRoot then break end
 			
-			local offset = targetRoot.CFrame.LookVector * -3
-			myRoot.CFrame = CFrame.new(targetRoot.Position + offset + Vector3.new(0, 0.5, 0))
+			-- Телепортируемся прямо к игроку для максимального шанса попадания
+			myRoot.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, 0.5, 0))
 			self:LookAt(targetRoot.Position)
 			
 			task.wait(0.05)
@@ -1456,7 +1459,6 @@ end
 -- MAIN STATE (LOCAL)
 -- =====================================================
 local State = {
-	MenuOpen = true,
 	MenuToggleKey = Enum.KeyCode.Insert,
 	IsResetting = false,
 }
@@ -1515,11 +1517,6 @@ end
 LocalPlayer.CharacterAdded:Connect(OnCharacterAdded)
 if LocalPlayer.Character then task.spawn(function() OnCharacterAdded(LocalPlayer.Character) end) end
 
-Services.UserInputService.InputBegan:Connect(function(input, gpe)
-	if not gpe and input.KeyCode == State.MenuToggleKey then
-		State.MenuOpen = not State.MenuOpen
-	end
-end)
 
 Services.Players.PlayerAdded:Connect(function()
 	task.wait(0.5)

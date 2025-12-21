@@ -17,6 +17,7 @@ local Services = {
 	TextChatService = game:GetService("TextChatService"),
 	CoreGui = game:GetService("CoreGui"),
 	StarterGui = game:GetService("StarterGui"),
+	Workspace = game:GetService("Workspace"),
 }
 
 local LocalPlayer = Services.Players.LocalPlayer
@@ -726,6 +727,7 @@ local Movement = {
 	WalkSpeed = { Enabled = false, Value = 16, Connection = nil },
 	JumpPower = { Enabled = false, Value = 50, Connection = nil },
 	Spin360 = { Enabled = false, Speed = 25, Connection = nil },
+	FlyCar = { Enabled = false, Speed = 50, Connection = nil },
 }
 
 function Movement:StartFly()
@@ -903,6 +905,165 @@ function Movement:Stop360Spin()
 	end
 end
 
+-- Функция для получения корня (Машины или Персонажа)
+-- Возвращает: rootPart, vehicleModel (или nil если не в машине)
+local function GetMovementRoot()
+	local char = LocalPlayer.Character
+	if not char then return nil, nil end
+	
+	local hum = char:FindFirstChild("Humanoid")
+	local root = char:FindFirstChild("HumanoidRootPart")
+	
+	if not hum or not root then return nil, nil end
+	
+	-- Проверяем, сидит ли игрок (VFly логика)
+	if hum.SeatPart then
+		-- Машина в этой игре - это Model в workspace.Vehicles
+		-- Структура: Model (имя игрока) -> Center, Driver, Ride, etc.
+		local vehicleModel = hum.SeatPart.Parent
+		if vehicleModel and vehicleModel:IsA("Model") then
+			-- Ищем основную часть машины для позиции: Center или PrimaryPart или сиденье
+			local mainPart = vehicleModel:FindFirstChild("Center") 
+				or vehicleModel.PrimaryPart 
+				or hum.SeatPart
+			return mainPart, vehicleModel
+		end
+		return hum.SeatPart, nil
+	else
+		-- Если не сидим, возвращаем персонажа (обычный Fly)
+		return root, nil
+	end
+end
+
+-- =====================================================
+-- IMPROVED FLY CAR (CAMERA BASED ROTATION & STRAFE)
+-- =====================================================
+
+function Movement:StartFlyCar()
+	if self.FlyCar.Connection then return end
+	
+	-- 1. Ищем транспорт
+	local vehicle = workspace.Vehicles:FindFirstChild(LocalPlayer.Name)
+	if not vehicle then 
+		local char = LocalPlayer.Character
+		local hum = char and char:FindFirstChild("Humanoid")
+		if hum and hum.SeatPart then
+			local current = hum.SeatPart
+			while current.Parent and current.Parent ~= workspace.Vehicles do
+				current = current.Parent
+			end
+			if current.Parent == workspace.Vehicles then
+				vehicle = current
+			end
+		end
+	end
+
+	if not vehicle then return end
+
+	-- 2. Ищем VectorForce
+	local vf = vehicle:FindFirstChildOfClass("VectorForce")
+	if not vf then return end
+
+	-- 3. Создаем BodyGyro для жесткой привязки к повороту камеры
+	local gyro = Instance.new("BodyGyro")
+	gyro.Name = "FlyGyro"
+	gyro.P = 50000 -- Высокая мощность для мгновенного отклика
+	gyro.D = 500   -- Демпфирование для плавности
+	gyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+	gyro.CFrame = vehicle.CFrame
+	gyro.Parent = vehicle
+
+	-- Множитель скорости (настраивай если медленно/быстро)
+	local SPEED_MULTIPLIER = 300 
+	
+	self.FlyCar.Connection = Services.RunService.RenderStepped:Connect(function(deltaTime)
+		if not vehicle or not vehicle.Parent or not vehicle:FindFirstChildOfClass("VectorForce") then
+			self:StopFlyCar()
+			return
+		end
+
+		local UIS = Services.UserInputService
+		local camera = workspace.CurrentCamera
+		
+		-- === АНТИ-ГРАВИТАЦИЯ ===
+		local totalMass = vehicle.AssemblyMass
+		local gravity = workspace.Gravity
+		local hoverForce = Vector3.new(0, totalMass * gravity, 0)
+		
+		-- === ПОВОРОТ (Как в обычном флае) ===
+		-- Машина всегда смотрит туда же, куда и камера
+		gyro.CFrame = camera.CFrame
+		
+		-- === ДВИЖЕНИЕ (Относительно камеры) ===
+		local speed = self.FlyCar.Speed * SPEED_MULTIPLIER
+		local moveVector = Vector3.new(0, 0, 0)
+		
+		-- W / S - Вперед / Назад (по вектору взгляда)
+		if UIS:IsKeyDown(Enum.KeyCode.W) then
+			moveVector = moveVector + camera.CFrame.LookVector
+		end
+		if UIS:IsKeyDown(Enum.KeyCode.S) then
+			moveVector = moveVector - camera.CFrame.LookVector
+		end
+		
+		-- A / D - Стрейф Влево / Вправо (по вектору "право" камеры)
+		if UIS:IsKeyDown(Enum.KeyCode.D) then
+			moveVector = moveVector + camera.CFrame.RightVector
+		end
+		if UIS:IsKeyDown(Enum.KeyCode.A) then
+			moveVector = moveVector - camera.CFrame.RightVector
+		end
+		
+		-- Q / E - Вертикальный взлет / спуск (в мировых координатах)
+		local verticalBonus = Vector3.new(0, 0, 0)
+		if UIS:IsKeyDown(Enum.KeyCode.Q) then
+			verticalBonus = Vector3.new(0, speed, 0)
+		elseif UIS:IsKeyDown(Enum.KeyCode.E) then
+			verticalBonus = Vector3.new(0, -speed, 0)
+		end
+		
+		-- Применяем силу
+		-- Если нажаты кнопки движения, нормализуем вектор и умножаем на скорость
+		if moveVector.Magnitude > 0 then
+			moveVector = moveVector.Unit * speed
+		end
+		
+		vf.Force = hoverForce + moveVector + verticalBonus
+	end)
+end
+
+function Movement:StopFlyCar()
+	if self.FlyCar.Connection then
+		self.FlyCar.Connection:Disconnect()
+		self.FlyCar.Connection = nil
+	end
+	
+	local vehicle = workspace.Vehicles:FindFirstChild(LocalPlayer.Name)
+	if not vehicle then
+		local char = LocalPlayer.Character
+		local hum = char and char:FindFirstChild("Humanoid")
+		if hum and hum.SeatPart then
+			local current = hum.SeatPart
+			while current.Parent and current.Parent ~= workspace.Vehicles do
+				current = current.Parent
+			end
+			if current.Parent == workspace.Vehicles then
+				vehicle = current
+			end
+		end
+	end
+
+	if vehicle then
+		local gyro = vehicle:FindFirstChild("FlyGyro")
+		if gyro then gyro:Destroy() end
+		
+		local vf = vehicle:FindFirstChildOfClass("VectorForce")
+		if vf then
+			vf.Force = Vector3.new(0, 0, 0)
+		end
+	end
+end
+
 function Movement:CleanupAll()
 	self:StopFly()
 	self:StopCFrameSpeed()
@@ -910,6 +1071,7 @@ function Movement:CleanupAll()
 	self:StopWalkSpeed()
 	self:StopJumpPower()
 	self:Stop360Spin()
+	self:StopFlyCar()
 end
 
 -- =====================================================
@@ -1113,6 +1275,120 @@ function Character:CleanupAll()
 	self:DisableNoSlow()
 	self:DisableNoJumpCooldown()
 	self:StopFell()
+end
+
+-- =====================================================
+-- DETECTIONS MODULE (LOCAL)
+-- =====================================================
+-- Настройки
+getgenv().ModDetectionEnabled = false -- true = включено, false = выключено
+
+local Detections = {
+	RPGDetection = { Enabled = false, Loop = nil },
+	GranadeDetection = { Enabled = false },
+	ModDetection = { Enabled = false, Connection = nil },
+	
+	ModDetectionSettings = {
+		GroupID = 4698921, -- ID группы Da Hood Entertainment
+		KickReason = "Moderator on server (Security Kick)", -- Причина кика
+		BlacklistedRoles = {
+			-- Список опасных ролей (названия должны точь-в-точь совпадать с ролями в группе)
+			"Testers",
+			"Moderators",
+			"Contributed",
+			"Monetization",
+			"ADMlN", -- Как ты указал (с буквой l вместо I), но лучше добавить и нормальное написание ниже
+			"Admin", -- На случай если там обычное написание
+			"Administrator",
+			"Owner"
+		},
+	},
+}
+
+local function IsThreatNear(threatName)
+	local threat = workspace:FindFirstChild("Ignored") and workspace.Ignored:FindFirstChild(threatName)
+	local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	return threat and hrp and (threat.Position - hrp.Position).Magnitude < 16
+end
+
+function Detections:StartThreatDetection()
+	if self.RPGDetection.Loop then return end
+	
+	self.RPGDetection.Loop = Services.RunService.PostSimulation:Connect(function()
+		local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+		local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+		if not hrp or not humanoid then return end
+		
+		local rpgThreat = workspace.Ignored:FindFirstChild("Model") and workspace.Ignored.Model:FindFirstChild("Launcher")
+		local grenadeThreat = IsThreatNear("Handle")
+		
+		if (self.RPGDetection.Enabled and rpgThreat) or (self.GranadeDetection.Enabled and grenadeThreat) then
+			local offset = Vector3.new(math.random(-100, 100), math.random(50, 150), math.random(-100, 100))
+			humanoid.CameraOffset = -offset
+			local oldCFrame = hrp.CFrame
+			hrp.CFrame = CFrame.new(hrp.CFrame.Position + offset)
+			Services.RunService.RenderStepped:Wait()
+			hrp.CFrame = oldCFrame
+		end
+	end)
+	
+	LocalPlayer.CharacterAdded:Connect(function()
+		task.wait(1)
+		if self.RPGDetection.Enabled or self.GranadeDetection.Enabled then
+			self:StartThreatDetection()
+		end
+	end)
+end
+
+function Detections:StopThreatDetection()
+	if self.RPGDetection.Loop then
+		self.RPGDetection.Loop:Disconnect()
+		self.RPGDetection.Loop = nil
+	end
+end
+
+function Detections:CheckPlayer(player)
+	-- Если функция выключена или проверяем сами себя -> пропускаем
+	if not getgenv().ModDetectionEnabled or player == LocalPlayer then return end
+	
+	local success, role = pcall(function() 
+		return player:GetRoleInGroup(self.ModDetectionSettings.GroupID) 
+	end)
+	
+	if success and role then
+		-- Проверяем, есть ли роль в нашем черном списке
+		for _, bannedRole in pairs(self.ModDetectionSettings.BlacklistedRoles) do
+			if role == bannedRole then
+				-- Если совпадение найдено -> кикаем себя
+				warn("Обнаружен модератор: " .. player.Name .. " [" .. role .. "]")
+				LocalPlayer:Kick(self.ModDetectionSettings.KickReason)
+				break
+			end
+		end
+	end
+end
+
+function Detections:StartModDetection()
+	if self.ModDetection.Connection then return end
+	
+	-- 1. Проверяем всех игроков, которые УЖЕ на сервере при запуске скрипта
+	for _, player in pairs(Services.Players:GetPlayers()) do
+		task.spawn(function()
+			self:CheckPlayer(player)
+		end)
+	end
+	
+	-- 2. Подписываемся на событие входа новых людей
+	self.ModDetection.Connection = Services.Players.PlayerAdded:Connect(function(player)
+		self:CheckPlayer(player)
+	end)
+end
+
+function Detections:StopModDetection()
+	if self.ModDetection.Connection then
+		self.ModDetection.Connection:Disconnect()
+		self.ModDetection.Connection = nil
+	end
 end
 
 -- =====================================================
@@ -1777,6 +2053,19 @@ do
 		end })
 	if bhopToggle.Option then bhopToggle.Option:AddKeybind({ Name = "Keybind", Flag = "BunnyHopKeybind" }) end
 	
+	local flyCarSlider = MovementSection:AddSlider({ Name = "Fly Car Speed", Default = 50, Min = 1, Max = 100, Round = 0, Flag = "FlyCarSpeed",
+		Callback = function(v) Movement.FlyCar.Speed = v end })
+	flyCarSlider:SetVisible(false)
+	
+	local flyCarToggle = MovementSection:AddToggle({ Name = "Fly Car", Default = false, Option = true, Flag = "FlyCarEnabled",
+		Callback = function(v)
+			if State.IsResetting then return end
+			Movement.FlyCar.Enabled = v
+			if v then Movement:StartFlyCar() else Movement:StopFlyCar() end
+			flyCarSlider:SetVisible(v)
+		end })
+	if flyCarToggle.Option then flyCarToggle.Option:AddKeybind({ Name = "Keybind", Flag = "FlyCarKeybind" }) end
+	
 	local HumanSection = Menus.Misc:AddSection({ Name = "Human", Side = "left", ShowTitle = true, Height = 0 })
 	
 	local wsSlider = HumanSection:AddSlider({ Name = "Speed", Default = 16, Min = 16, Max = 200, Round = 0, Flag = "WalkSpeedValue",
@@ -1852,6 +2141,39 @@ do
 		Callback = function(v)
 			Character.InfiniteZoom.Enabled = v
 			if v then Character:EnableInfiniteZoom() else Character:DisableInfiniteZoom() end
+		end })
+	
+	local DetectionsSection = Menus.Misc:AddSection({ Name = "Detections", Side = "right", ShowTitle = true, Height = 0 })
+	
+	DetectionsSection:AddToggle({ Name = "RPG Detection", Default = false, Flag = "RPGDetectionEnabled",
+		Callback = function(v)
+			Detections.RPGDetection.Enabled = v
+			if v or Detections.GranadeDetection.Enabled then
+				Detections:StartThreatDetection()
+			else
+				Detections:StopThreatDetection()
+			end
+		end })
+	
+	DetectionsSection:AddToggle({ Name = "Granade Detection", Default = false, Flag = "GranadeDetectionEnabled",
+		Callback = function(v)
+			Detections.GranadeDetection.Enabled = v
+			if v or Detections.RPGDetection.Enabled then
+				Detections:StartThreatDetection()
+			else
+				Detections:StopThreatDetection()
+			end
+		end })
+	
+	DetectionsSection:AddToggle({ Name = "Mod Detection", Default = false, Flag = "ModDetectionEnabled",
+		Callback = function(v)
+			getgenv().ModDetectionEnabled = v
+			Detections.ModDetection.Enabled = v
+			if v then
+				Detections:StartModDetection()
+			else
+				Detections:StopModDetection()
+			end
 		end })
 end
 

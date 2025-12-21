@@ -1116,7 +1116,7 @@ function Character:CleanupAll()
 end
 
 -- =====================================================
--- PLAYER SYSTEM MODULE (LOCAL)
+-- PLAYER SYSTEM MODULE (LOCAL) - REWORKED WITH SILENT SHOT
 -- =====================================================
 local PlayerSystem = {
 	KnockActive = {},
@@ -1126,65 +1126,114 @@ local PlayerSystem = {
 	SpectatingPlayer = nil,
 	SelectedPlayer = nil,
 	Dropdown = nil,
+	
+	-- Настройки Silent Shot для системы игроков
+	SilentShot = {
+		LastShot = 0,
+		TeleportDistance = 30, -- Расстояние для телепортации
+		AutoReload = true,
+	},
 }
 
-function PlayerSystem:GetCombatTool()
+-- Получить огнестрельное оружие (не мили)
+function PlayerSystem:GetGun()
 	local char = LocalPlayer.Character
 	if not char then return nil end
-	local hum = char:FindFirstChildOfClass("Humanoid")
-	if not hum then return nil end
 	
-	for _, child in pairs(char:GetChildren()) do
-		if child:IsA("Tool") then
-			if child:FindFirstChild("CombatScript") then return child end
-			for _, name in ipairs(Config.Weapons.Combat) do
-				if child.Name:upper():find(name:upper()) then return child end
-			end
-		end
-	end
+	local tool = char:FindFirstChildWhichIsA("Tool")
+	if not tool then return nil end
+	if not tool:FindFirstChild("Handle") then return nil end
+	if not tool:FindFirstChild("RemoteEvent") then return nil end
+	if not tool:FindFirstChild("Ammo") then return nil end
 	
-	local backpack = LocalPlayer.Backpack
-	if backpack then
-		for _, child in pairs(backpack:GetChildren()) do
-			if child:IsA("Tool") then
-				if child:FindFirstChild("CombatScript") then
-					hum:EquipTool(child)
-					task.wait(0.15)
-					return child
-				end
-				for _, name in ipairs(Config.Weapons.Combat) do
-					if child.Name:upper():find(name:upper()) then
-						hum:EquipTool(child)
-						task.wait(0.15)
-						return child
-					end
-				end
-			end
-		end
-	end
-	return nil
+	-- Исключаем мили оружие и несовместимое
+	if Config.Weapons.Melee[tool.Name:upper()] then return nil end
+	if Config.Weapons.NoSilent[tool.Name:upper()] then return nil end
+	
+	return tool
 end
 
-function PlayerSystem:PerformPunch()
-	if mouse1click then
-		mouse1click()
-	elseif mouse1press and mouse1release then
-		mouse1press()
+-- Проверка возможности стрельбы
+function PlayerSystem:CanShoot()
+	local char, hum = Utils.GetCharacterParts()
+	if not char or not hum then return false, nil end
+	
+	local gun = self:GetGun()
+	if not gun then return false, nil end
+	
+	local ammo = gun:FindFirstChild("Ammo")
+	if ammo and ammo.Value <= 0 then return false, gun end
+	
+	local bodyEffects = char:FindFirstChild("BodyEffects")
+	if not bodyEffects then return false, nil end
+	
+	if bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then return false, nil end
+	if bodyEffects:FindFirstChild("Dead") and bodyEffects.Dead.Value then return false, nil end
+	if bodyEffects:FindFirstChild("Reload") and bodyEffects.Reload.Value then return false, gun end
+	
+	return true, gun
+end
+
+-- Выстрел через Silent в цель
+function PlayerSystem:SilentShootAt(targetPlayer, hitboxName)
+	local canShoot, gun = self:CanShoot()
+	
+	if not canShoot then
+		-- Авто перезарядка если нет патронов
+		if gun and self.SilentShot.AutoReload then
+			local ammo = gun:FindFirstChild("Ammo")
+			if ammo and ammo.Value <= 0 then
+				MainEvent:FireServer("Reload", gun)
+				task.wait(0.5)
+			end
+		end
+		return false
+	end
+	
+	local targetChar = targetPlayer.Character
+	if not targetChar then return false end
+	if not Utils.IsCharacterAlive(targetChar) then return false end
+	
+	local hitbox = Utils.GetHitboxPart(targetChar, hitboxName or "Head")
+	if not hitbox then return false end
+	
+	-- Проверяем видимость
+	if not Utils.IsVisible(Camera.CFrame.Position, hitbox) then return false end
+	
+	local handle = gun:FindFirstChild("Handle")
+	if not handle then return false end
+	
+	-- Предсказание позиции через Aimbot модуль
+	local predictedPos = Aimbot:PredictPositionSilent(targetChar, hitbox)
+	if not predictedPos then 
+		predictedPos = hitbox.Position 
+	end
+	
+	-- Отправляем выстрел напрямую
+	local startPos = Camera.CFrame.Position
+	local normal = (predictedPos - startPos).Unit
+	if normal.Magnitude == 0 then normal = Vector3.new(0, 1, 0) end
+	
+	MainEvent:FireServer("ShootGun", handle, startPos, predictedPos, hitbox, normal)
+	
+	self.SilentShot.LastShot = tick()
+	return true
+end
+
+-- Телепортация к цели на безопасное расстояние для стрельбы
+function PlayerSystem:TeleportForShot(targetRoot, myRoot)
+	if not targetRoot or not myRoot then return end
+	
+	local distance = (myRoot.Position - targetRoot.Position).Magnitude
+	if distance > self.SilentShot.TeleportDistance then
+		local direction = (targetRoot.Position - myRoot.Position).Unit
+		local newPos = targetRoot.Position - direction * (self.SilentShot.TeleportDistance - 5)
+		myRoot.CFrame = CFrame.new(newPos)
 		task.wait(0.05)
-		mouse1release()
 	end
 end
 
-function PlayerSystem:PerformHeavyPunch()
-	if mouse1press and mouse1release then
-		mouse1press()
-		task.wait(0.5)
-		mouse1release()
-	elseif mouse1click then
-		mouse1click()
-	end
-end
-
+-- Наведение на цель (поворот персонажа)
 function PlayerSystem:LookAt(targetPos)
 	local char = LocalPlayer.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -1197,6 +1246,7 @@ function PlayerSystem:LookAt(targetPos)
 	end
 end
 
+-- KNOCK через Silent Shot (стрельба в голову до K.O)
 function PlayerSystem:Knock(target)
 	if not target or self.KnockActive[target] then return end
 	local targetChar = target.Character
@@ -1214,46 +1264,61 @@ function PlayerSystem:Knock(target)
 		if not myRoot then self.KnockActive[target] = nil return end
 		
 		local savedPos = myRoot.CFrame
-		local combatTool = self:GetCombatTool()
-		if not combatTool then self.KnockActive[target] = nil return end
+		local shotsFired = 0
+		local maxShots = 100 -- Лимит выстрелов
 		
-		local attackCount = 0
-		while self.KnockActive[target] do
+		while self.KnockActive[target] and shotsFired < maxShots do
+			-- Проверяем состояние цели
 			targetChar = target.Character
 			if not targetChar or not targetChar.Parent then break end
 			
+			bodyEffects = targetChar:FindFirstChild("BodyEffects")
+			koValue = bodyEffects and bodyEffects:FindFirstChild("K.O")
+			if not koValue or koValue.Value then break end -- Уже в K.O
+			
+			local deadValue = bodyEffects:FindFirstChild("Dead")
+			if deadValue and deadValue.Value then break end -- Уже мертв
+			
+			-- Проверяем себя
 			myChar = LocalPlayer.Character
 			myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
 			if not myRoot then break end
 			
-			bodyEffects = targetChar:FindFirstChild("BodyEffects")
-			koValue = bodyEffects and bodyEffects:FindFirstChild("K.O")
-			if not koValue or koValue.Value then break end
-			
-			local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
-			if not targetRoot then break end
-			
-			-- Телепортируемся прямо к игроку для максимального шанса попадания
-			myRoot.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, 0.5, 0))
-			self:LookAt(targetRoot.Position)
-			
-			task.wait(0.05)
-			attackCount = attackCount + 1
-			if attackCount % 4 == 0 then
-				self:PerformHeavyPunch()
-				task.wait(0.3)
+			local gun = self:GetGun()
+			if gun then
+				local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+				if targetRoot then
+					-- Телепортируемся на дистанцию стрельбы
+					self:TeleportForShot(targetRoot, myRoot)
+					self:LookAt(targetRoot.Position)
+				end
+				
+				-- Стреляем в голову
+				if self:SilentShootAt(target, "Head") then
+					shotsFired = shotsFired + 1
+				end
+				
+				-- Задержка между выстрелами
+				local fireRate = Aimbot:GetWeaponFireRate(gun)
+				task.wait(math.max(fireRate + 0.02, 0.08))
 			else
-				self:PerformPunch()
-				task.wait(0.15)
+				-- Нет оружия - ждем
+				task.wait(0.3)
 			end
 		end
 		
+		-- Возвращаемся на исходную позицию
 		task.wait(0.1)
-		if myRoot and myRoot.Parent then myRoot.CFrame = savedPos end
+		myChar = LocalPlayer.Character
+		myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		if myRoot and myRoot.Parent then 
+			myRoot.CFrame = savedPos 
+		end
 		self.KnockActive[target] = nil
 	end)
 end
 
+-- KILL через Silent Shot (стрельба + добивание)
 function PlayerSystem:Kill(target)
 	if not target or self.KillActive[target] then return end
 	local targetChar = target.Character
@@ -1267,11 +1332,13 @@ function PlayerSystem:Kill(target)
 		if not myRoot then self.KillActive[target] = nil return end
 		
 		local savedPos = myRoot.CFrame
-		local combatTool = self:GetCombatTool()
-		if not combatTool then self.KillActive[target] = nil return end
+		local shotsFired = 0
+		local maxShots = 150
+		local stompCount = 0
+		local maxStomps = 20
 		
-		local attackCount = 0
-		while self.KillActive[target] do
+		-- Фаза 1: Стреляем до K.O
+		while self.KillActive[target] and shotsFired < maxShots do
 			targetChar = target.Character
 			if not targetChar or not targetChar.Parent then break end
 			
@@ -1282,32 +1349,34 @@ function PlayerSystem:Kill(target)
 			local bodyEffects = targetChar:FindFirstChild("BodyEffects")
 			if not bodyEffects then break end
 			
-			local koValue = bodyEffects:FindFirstChild("K.O")
 			local deadValue = bodyEffects:FindFirstChild("Dead")
-			if deadValue and deadValue.Value then break end
-			if koValue and koValue.Value then break end
+			if deadValue and deadValue.Value then break end -- Уже мертв
 			
-			local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
-			if not targetRoot then break end
+			local koValue = bodyEffects:FindFirstChild("K.O")
+			if koValue and koValue.Value then break end -- В K.O - переходим к добиванию
 			
-			-- Телепортируемся прямо к игроку для максимального шанса попадания
-			myRoot.CFrame = CFrame.new(targetRoot.Position + Vector3.new(0, 0.5, 0))
-			self:LookAt(targetRoot.Position)
-			
-			task.wait(0.05)
-			attackCount = attackCount + 1
-			if attackCount % 4 == 0 then
-				self:PerformHeavyPunch()
-				task.wait(0.3)
+			local gun = self:GetGun()
+			if gun then
+				local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+				if targetRoot then
+					self:TeleportForShot(targetRoot, myRoot)
+					self:LookAt(targetRoot.Position)
+				end
+				
+				if self:SilentShootAt(target, "Head") then
+					shotsFired = shotsFired + 1
+				end
+				
+				local fireRate = Aimbot:GetWeaponFireRate(gun)
+				task.wait(math.max(fireRate + 0.02, 0.08))
 			else
-				self:PerformPunch()
-				task.wait(0.15)
+				task.wait(0.3)
 			end
 		end
 		
-		task.wait(0.2)
-		for i = 1, 15 do
-			if not self.KillActive[target] then break end
+		-- Фаза 2: Добивание (Stomp) когда в K.O
+		task.wait(0.1)
+		while self.KillActive[target] and stompCount < maxStomps do
 			targetChar = target.Character
 			if not targetChar or not targetChar.Parent then break end
 			
@@ -1316,20 +1385,52 @@ function PlayerSystem:Kill(target)
 			if not myRoot then break end
 			
 			local bodyEffects = targetChar:FindFirstChild("BodyEffects")
-			local deadValue = bodyEffects and bodyEffects:FindFirstChild("Dead")
-			if deadValue and deadValue.Value then break end
+			if not bodyEffects then break end
 			
-			local targetTorso = targetChar:FindFirstChild("UpperTorso") or targetChar:FindFirstChild("HumanoidRootPart")
+			local deadValue = bodyEffects:FindFirstChild("Dead")
+			if deadValue and deadValue.Value then break end -- Убит!
+			
+			local koValue = bodyEffects:FindFirstChild("K.O")
+			if not koValue or not koValue.Value then 
+				-- Вышел из K.O - продолжаем стрелять
+				local gun = self:GetGun()
+				if gun then
+					local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+					if targetRoot then
+						self:TeleportForShot(targetRoot, myRoot)
+						self:LookAt(targetRoot.Position)
+					end
+					self:SilentShootAt(target, "Head")
+					local fireRate = Aimbot:GetWeaponFireRate(gun)
+					task.wait(math.max(fireRate + 0.02, 0.08))
+				else
+					task.wait(0.3)
+				end
+				continue
+			end
+			
+			-- Добиваем через Stomp
+			local targetTorso = targetChar:FindFirstChild("UpperTorso") or 
+			                   targetChar:FindFirstChild("Torso") or 
+			                   targetChar:FindFirstChild("HumanoidRootPart")
 			if targetTorso then
 				myRoot.CFrame = CFrame.new(targetTorso.Position + Vector3.new(0, 3, 0))
 				task.wait(0.05)
 				MainEvent:FireServer("Stomp")
+				stompCount = stompCount + 1
 				task.wait(0.25)
+			else
+				task.wait(0.2)
 			end
 		end
 		
+		-- Возвращаемся
 		task.wait(0.1)
-		if myRoot and myRoot.Parent then myRoot.CFrame = savedPos end
+		myChar = LocalPlayer.Character
+		myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+		if myRoot and myRoot.Parent then 
+			myRoot.CFrame = savedPos 
+		end
 		self.KillActive[target] = nil
 	end)
 end
@@ -1405,8 +1506,10 @@ function PlayerSystem:StartAutoKill()
 		while self.AutoKillActive do
 			if #self.AutoKillTargets == 0 then task.wait(0.5) continue end
 			
-			for i, target in ipairs(self.AutoKillTargets) do
+			for i = #self.AutoKillTargets, 1, -1 do
 				if not self.AutoKillActive then break end
+				local target = self.AutoKillTargets[i]
+				
 				if not target or not target.Parent then
 					table.remove(self.AutoKillTargets, i)
 					continue
@@ -1424,10 +1527,14 @@ function PlayerSystem:StartAutoKill()
 				
 				if not self.KillActive[target] then
 					self:Kill(target)
-					task.wait(2)
+					-- Ждем завершения
+					while self.KillActive[target] do
+						task.wait(0.1)
+					end
+					task.wait(0.5)
 				end
 			end
-			task.wait(0.5)
+			task.wait(0.3)
 		end
 	end)
 end
@@ -1764,10 +1871,17 @@ do
 	
 	PlayerSection:AddButton({ Name = "Refresh List", Flag = "RefreshPlayerList",
 		Callback = function() PlayerSystem:RefreshDropdown() end })
-	PlayerSection:AddButton({ Name = "Knock", Flag = "PlayerKnock",
+	PlayerSection:AddButton({ Name = "Knock (Silent Shot)", Flag = "PlayerKnock",
 		Callback = function() if PlayerSystem.SelectedPlayer then PlayerSystem:Knock(PlayerSystem.SelectedPlayer) end end })
-	PlayerSection:AddButton({ Name = "Kill", Flag = "PlayerKill",
+	PlayerSection:AddButton({ Name = "Kill (Silent Shot)", Flag = "PlayerKill",
 		Callback = function() if PlayerSystem.SelectedPlayer then PlayerSystem:Kill(PlayerSystem.SelectedPlayer) end end })
+	PlayerSection:AddButton({ Name = "Stop Knock/Kill", Flag = "StopKnockKill",
+		Callback = function()
+			if PlayerSystem.SelectedPlayer then
+				PlayerSystem.KnockActive[PlayerSystem.SelectedPlayer] = nil
+				PlayerSystem.KillActive[PlayerSystem.SelectedPlayer] = nil
+			end
+		end })
 	PlayerSection:AddButton({ Name = "Fling", Flag = "PlayerFling",
 		Callback = function() if PlayerSystem.SelectedPlayer then PlayerSystem:Fling(PlayerSystem.SelectedPlayer) end end })
 	PlayerSection:AddButton({ Name = "Teleport", Flag = "PlayerTeleport",
@@ -1776,14 +1890,38 @@ do
 		Callback = function() if PlayerSystem.SelectedPlayer then PlayerSystem:Spectate(PlayerSystem.SelectedPlayer) end end })
 	PlayerSection:AddButton({ Name = "Stop Spectate", Flag = "StopSpectate",
 		Callback = function() PlayerSystem:StopSpectate() end })
-	PlayerSection:AddButton({ Name = "Add to Auto Kill", Flag = "AddAutoKill",
+	
+	-- Настройки Silent Shot
+	local SettingsSection = Menus.Players:AddSection({ Name = "Silent Shot Settings", Side = "right", ShowTitle = true, Height = 0 })
+	
+	SettingsSection:AddSlider({ 
+		Name = "Teleport Distance", 
+		Default = 30, 
+		Min = 10, 
+		Max = 100, 
+		Round = 0, 
+		Flag = "TeleportDistance",
+		Callback = function(v) PlayerSystem.SilentShot.TeleportDistance = v end 
+	})
+	
+	SettingsSection:AddToggle({ 
+		Name = "Auto Reload", 
+		Default = true, 
+		Flag = "AutoReloadKill",
+		Callback = function(v) PlayerSystem.SilentShot.AutoReload = v end 
+	})
+	
+	-- Auto Kill секция
+	local AutoSection = Menus.Players:AddSection({ Name = "Auto Kill", Side = "right", ShowTitle = true, Height = 0 })
+	
+	AutoSection:AddButton({ Name = "Add to Auto Kill", Flag = "AddAutoKill",
 		Callback = function()
 			if PlayerSystem.SelectedPlayer and not table.find(PlayerSystem.AutoKillTargets, PlayerSystem.SelectedPlayer) then
 				table.insert(PlayerSystem.AutoKillTargets, PlayerSystem.SelectedPlayer)
 				PlayerSystem:StartAutoKill()
 			end
 		end })
-	PlayerSection:AddButton({ Name = "Remove from Auto Kill", Flag = "RemoveAutoKill",
+	AutoSection:AddButton({ Name = "Remove from Auto Kill", Flag = "RemoveAutoKill",
 		Callback = function()
 			if PlayerSystem.SelectedPlayer then
 				local idx = table.find(PlayerSystem.AutoKillTargets, PlayerSystem.SelectedPlayer)
@@ -1793,7 +1931,7 @@ do
 				end
 			end
 		end })
-	PlayerSection:AddToggle({ Name = "Auto Kill All", Default = false, Flag = "AutoKillAll",
+	AutoSection:AddToggle({ Name = "Auto Kill All", Default = false, Flag = "AutoKillAll",
 		Callback = function(v)
 			if v then
 				for _, p in ipairs(Services.Players:GetPlayers()) do

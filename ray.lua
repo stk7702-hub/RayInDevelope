@@ -45,7 +45,9 @@ local Config = {
 		TabUnselected = Color3.fromRGB(75, 75, 75),
 		ProfileStroke = Color3.fromRGB(255, 255, 255),
 		LogoText = Color3.fromRGB(229, 229, 229),
+		LogoStroke = Color3.fromRGB(205, 67, 218),
 		UsernameText = Color3.fromRGB(255, 255, 255),
+		DropdownSelected = Color3.fromRGB(255, 106, 133),
 	},
 	
 	Weapons = {
@@ -567,7 +569,10 @@ function Aimbot:StartCameraLock()
 		if not self.CameraLock.Active then return end
 		
 		-- Если меню открыто - не двигаем камеру, чтобы не мешать пользователю
-		if Window and Window.Toggle then return end
+		if menuOpen then
+			self.CameraLock.CurrentTarget = nil
+			return
+		end
 		
 		local currentTime = tick()
 		local deltaTime = math.clamp(currentTime - self.CameraLock.LastTime, 0.001, 0.1)
@@ -1846,6 +1851,12 @@ local State = {
 	IsResetting = false,
 }
 
+-- Переменная для отслеживания состояния меню
+local menuOpen = true
+
+-- Объявляем Window заранее, чтобы он был доступен в функциях модулей
+local Window
+
 -- =====================================================
 -- INITIALIZE
 -- =====================================================
@@ -1922,7 +1933,7 @@ end)
 -- =====================================================
 -- UI SETUP
 -- =====================================================
-local Window = Fatality.new({
+Window = Fatality.new({
 	Name = "RAY",
 	Keybind = Enum.KeyCode.Insert,
 	Scale = UDim2.new(0, 750, 0, 500),
@@ -1933,6 +1944,18 @@ local Window = Fatality.new({
 	BottomHeight = 30,
 	Theme = Config.Theme,
 })
+
+-- Библиотека теперь поддерживает LogoStroke и DropdownSelected напрямую через BindTheme
+
+-- Подписываемся на сигнал библиотеки для отслеживания состояния меню
+-- Библиотека сама обрабатывает нажатие Insert, поэтому НЕ нужно слушать InputBegan
+if Window and Window.Signal then
+	Window.Signal.Event:Connect(function(isVisible)
+		menuOpen = isVisible
+	end)
+	-- Устанавливаем начальное состояние из библиотеки
+	menuOpen = Window.Toggle
+end
 
 local Menus = {
 	Legit = Window:AddMenu({ Name = "Legit", Icon = "lucide-mouse", AutoFill = false }),
@@ -2027,6 +2050,19 @@ do
 		end })
 	if flyToggle.Option then flyToggle.Option:AddKeybind({ Name = "Keybind", Flag = "FlyKeybind" }) end
 	
+	local flyCarSlider = MovementSection:AddSlider({ Name = "Fly Car Speed", Default = 50, Min = 1, Max = 100, Round = 0, Flag = "FlyCarSpeed",
+		Callback = function(v) Movement.FlyCar.Speed = v end })
+	flyCarSlider:SetVisible(false)
+	
+	local flyCarToggle = MovementSection:AddToggle({ Name = "Fly Car", Default = false, Option = true, Flag = "FlyCarEnabled",
+		Callback = function(v)
+			if State.IsResetting then return end
+			Movement.FlyCar.Enabled = v
+			if v then Movement:StartFlyCar() else Movement:StopFlyCar() end
+			flyCarSlider:SetVisible(v)
+		end })
+	if flyCarToggle.Option then flyCarToggle.Option:AddKeybind({ Name = "Keybind", Flag = "FlyCarKeybind" }) end
+	
 	local cframeSlider = MovementSection:AddSlider({ Name = "CFrame Speed", Default = 50, Min = 1, Max = 100, Round = 0, Flag = "CFrameSpeedValue",
 		Callback = function(v) Movement.CFrameSpeed.Value = v end })
 	cframeSlider:SetVisible(false)
@@ -2052,19 +2088,6 @@ do
 			bhopSlider:SetVisible(v)
 		end })
 	if bhopToggle.Option then bhopToggle.Option:AddKeybind({ Name = "Keybind", Flag = "BunnyHopKeybind" }) end
-	
-	local flyCarSlider = MovementSection:AddSlider({ Name = "Fly Car Speed", Default = 50, Min = 1, Max = 100, Round = 0, Flag = "FlyCarSpeed",
-		Callback = function(v) Movement.FlyCar.Speed = v end })
-	flyCarSlider:SetVisible(false)
-	
-	local flyCarToggle = MovementSection:AddToggle({ Name = "Fly Car", Default = false, Option = true, Flag = "FlyCarEnabled",
-		Callback = function(v)
-			if State.IsResetting then return end
-			Movement.FlyCar.Enabled = v
-			if v then Movement:StartFlyCar() else Movement:StopFlyCar() end
-			flyCarSlider:SetVisible(v)
-		end })
-	if flyCarToggle.Option then flyCarToggle.Option:AddKeybind({ Name = "Keybind", Flag = "FlyCarKeybind" }) end
 	
 	local HumanSection = Menus.Misc:AddSection({ Name = "Human", Side = "left", ShowTitle = true, Height = 0 })
 	
@@ -2417,10 +2440,33 @@ do
 	})
 
 	UI:AddColorPicker({ 
+		Name = "Logo Stroke", 
+		Default = Config.Theme.LogoStroke, 
+		Callback = function(c) 
+			Config.Theme.LogoStroke = c
+			Window:SetTheme({ LogoStroke = c }) 
+		end, 
+		Flag = "LogoStrokeColor" 
+	})
+
+	UI:AddColorPicker({ 
 		Name = "Username Text", 
 		Default = Config.Theme.UsernameText, 
-		Callback = function(c) Window:SetTheme({ UsernameText = c }) end, 
+		Callback = function(c) 
+			Config.Theme.UsernameText = c
+			Window:SetTheme({ UsernameText = c }) 
+		end, 
 		Flag = "UsernameTextColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Dropdown Selected", 
+		Default = Config.Theme.DropdownSelected, 
+		Callback = function(c) 
+			Config.Theme.DropdownSelected = c
+			Window:SetTheme({ DropdownSelected = c }) 
+		end, 
+		Flag = "DropdownSelectedColor" 
 	})
 end
 

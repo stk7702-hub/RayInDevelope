@@ -47,6 +47,8 @@ local Config = {
 		LogoText = Color3.fromRGB(229, 229, 229),
 		LogoStroke = Color3.fromRGB(205, 67, 218),
 		UsernameText = Color3.fromRGB(255, 255, 255),
+		ExpireLabel = Color3.fromRGB(150, 150, 150),
+		ExpireText = Color3.fromRGB(245, 49, 116),
 		DropdownSelected = Color3.fromRGB(255, 106, 133),
 	},
 	
@@ -1937,7 +1939,7 @@ Window = Fatality.new({
 	Name = "RAY",
 	Keybind = Enum.KeyCode.Insert,
 	Scale = UDim2.new(0, 750, 0, 500),
-	Expire = "Never",
+	Expire = "LifeTime",
 	SidebarWidth = 200,
 	TabHeight = 40,
 	HeaderHeight = 50,
@@ -2457,6 +2459,26 @@ do
 			Window:SetTheme({ UsernameText = c }) 
 		end, 
 		Flag = "UsernameTextColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Expire Label", 
+		Default = Config.Theme.ExpireLabel, 
+		Callback = function(c) 
+			Config.Theme.ExpireLabel = c
+			Window:SetTheme({ ExpireLabel = c }) 
+		end, 
+		Flag = "ExpireLabelColor" 
+	})
+
+	UI:AddColorPicker({ 
+		Name = "Expire Text (LifeTime)", 
+		Default = Config.Theme.ExpireText, 
+		Callback = function(c) 
+			Config.Theme.ExpireText = c
+			Window:SetTheme({ ExpireText = c }) 
+		end, 
+		Flag = "ExpireTextColor" 
 	})
 
 	UI:AddColorPicker({ 

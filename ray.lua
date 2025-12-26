@@ -18,6 +18,7 @@ local Services = {
 	CoreGui = game:GetService("CoreGui"),
 	StarterGui = game:GetService("StarterGui"),
 	Workspace = game:GetService("Workspace"),
+	GuiService = game:GetService("GuiService"),
 }
 
 local LocalPlayer = Services.Players.LocalPlayer
@@ -45,11 +46,11 @@ local Config = {
 		TabUnselected = Color3.fromRGB(75, 75, 75),
 		ProfileStroke = Color3.fromRGB(255, 255, 255),
 		LogoText = Color3.fromRGB(229, 229, 229),
-		LogoStroke = Color3.fromRGB(205, 67, 218),
+		LogoStroke = Color3.fromRGB(255, 255, 255),
 		UsernameText = Color3.fromRGB(255, 255, 255),
 		ExpireLabel = Color3.fromRGB(150, 150, 150),
-		ExpireText = Color3.fromRGB(245, 49, 116),
-		DropdownSelected = Color3.fromRGB(255, 106, 133),
+		ExpireText = Color3.fromRGB(0, 255, 0),
+		DropdownSelected = Color3.fromRGB(0, 255, 0),
 	},
 	
 	Weapons = {
@@ -194,6 +195,26 @@ end
 
 function Utils.CalculateSmoothAlpha(deltaTime, tau)
 	return 1 - math.exp(-deltaTime / tau)
+end
+
+-- Функция проверки, можно ли управлять камерой (UI не мешает)
+function Utils.IsUIBlocking()
+	-- Проверяем открыто ли наше меню
+	if menuOpen then return true end
+	
+	-- Проверяем открыто ли ESC-меню Roblox
+	if Services.GuiService.MenuIsOpen then return true end
+	
+	-- Проверяем, печатает ли пользователь в текстовое поле
+	if Services.UserInputService:GetFocusedTextBox() ~= nil then return true end
+	
+	return false
+end
+
+-- Проверка, активен ли ShiftLock или другой режим блокировки мыши
+function Utils.IsShiftLockActive()
+	-- Проверяем MouseBehavior - если LockCenter, значит мышь заблокирована (ShiftLock или другой режим)
+	return Services.UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
 end
 
 -- =====================================================
@@ -570,8 +591,8 @@ function Aimbot:StartCameraLock()
 	self.CameraLock.Connection = Services.RunService.RenderStepped:Connect(function()
 		if not self.CameraLock.Active then return end
 		
-		-- Если меню открыто - не двигаем камеру, чтобы не мешать пользователю
-		if menuOpen then
+		-- Проверка: UI блокирует управление камерой?
+		if Utils.IsUIBlocking() then
 			self.CameraLock.CurrentTarget = nil
 			return
 		end
@@ -597,13 +618,34 @@ function Aimbot:StartCameraLock()
 		local mousePos = Utils.GetMousePosition()
 		local delta = screenPos - mousePos
 		local distance = delta.Magnitude
-		if distance < 1 then return end
 		
 		local smoothness = self.CameraLock.Smoothness
+		local isShiftLock = Utils.IsShiftLockActive()
+		
+		-- Deadzone: не двигаем камеру если цель очень близко к центру (предотвращает дрожание)
+		-- В ShiftLock используем больший deadzone для уменьшения конфликтов
+		local deadzone = isShiftLock and 5 or 3 -- пикселей
+		if distance < deadzone then return end
+		
+		-- Адаптивное сглаживание: когда цель близко - движение слабее, когда далеко - сильнее
+		local distanceMultiplier = math.clamp(distance / 200, 0.3, 1.5)
+		-- В ShiftLock используем более плавное сглаживание и меньший множитель для уменьшения дрожания
+		if isShiftLock then
+			-- Более консервативный подход: меньший множитель и более плавное движение
+			distanceMultiplier = math.clamp(distance / 400, 0.15, 1.0)
+		end
+		
 		local smoothFactor = smoothness <= 0.01 and 1 or (1 - smoothness) ^ 0.7
 		smoothFactor = smoothFactor * (deltaTime / (1/60))
-		smoothFactor = math.clamp(smoothFactor * math.clamp(distance / 200, 0.3, 1.5), 0.02, 1)
 		
+		-- В ShiftLock дополнительно уменьшаем smoothFactor для более плавного движения
+		if isShiftLock then
+			smoothFactor = smoothFactor * 0.6 -- Дополнительное уменьшение силы движения
+		end
+		
+		smoothFactor = math.clamp(smoothFactor * distanceMultiplier, 0.02, 1)
+		
+		-- Двигаем мышь (в ShiftLock Roblox сам обработает центрирование, но с меньшей силой движения дрожание уменьшится)
 		local moveX = delta.X * smoothFactor
 		local moveY = delta.Y * smoothFactor
 		
@@ -722,6 +764,493 @@ function Aimbot:ClearCache()
 	self.Cache.SmoothedVelocities = {}
 	self.Cache.LastUpdateTimes = {}
 	self.Cache.Acceleration = {}
+end
+
+-- =====================================================
+-- RAGEBOT MODULE (LOCAL) - UPDATED WITH 360° & AUTO PREDICTION
+-- =====================================================
+local Ragebot = {
+	-- Главный переключатель
+	Enabled = false,
+	
+	-- Настройки прицеливания
+	Hitbox = "Head",
+	Prediction = 0.15,
+	FOV = 500,
+	IgnoreFOV = true, -- 360 градусов - целится в любого видимого игрока
+	
+	-- Auto Prediction (как в Silent)
+	AutoPrediction = {
+		Enabled = false,
+		Divisor = 250,
+		Tau = 0.15, -- Сглаживание скорости
+	},
+	
+	-- Autofire
+	Autofire = {
+		Enabled = false,
+		Connection = nil,
+		LastShot = 0,
+	},
+	
+	-- Autoequip
+	Autoequip = {
+		Enabled = false,
+		Connection = nil,
+		Priority = {"RIFLE", "AK47", "AR", "SMG", "UZI", "TEC9", "LMG", "AUG", "SHOTGUN", "TACTICAL SHOTGUN", "DOUBLE BARREL", "REVOLVER", "GLOCK", "SILENCER"},
+	},
+	
+	-- Rapidfire
+	Rapidfire = {
+		Enabled = false,
+		Multiplier = 2,
+	},
+	
+	-- Killaura
+	Killaura = {
+		Enabled = false,
+		Connection = nil,
+		Range = 15,
+		LastAttack = 0,
+		AttackDelay = 0.1,
+	},
+	
+	-- Кэш для velocity smoothing
+	Cache = {
+		CurrentTarget = nil,
+		PreviousPositions = {},
+		SmoothedVelocities = {},
+		LastUpdateTimes = {},
+		Acceleration = {},
+	},
+}
+
+-- Получить сглаженную скорость (как в Silent Aim)
+function Ragebot:GetSmoothedVelocity(character)
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return Vector3.zero, Vector3.zero end
+	
+	local player = Services.Players:GetPlayerFromCharacter(character)
+	local tau = self.AutoPrediction.Tau or 0.15
+	
+	if not player then
+		local velocity = rootPart.AssemblyLinearVelocity
+		if velocity.Magnitude > Config.Prediction.MaxVelocity then
+			velocity = velocity.Unit * Config.Prediction.MaxVelocity
+		end
+		return velocity, Vector3.zero
+	end
+	
+	local currentTime = tick()
+	local currentPos = rootPart.Position
+	local lastPos = self.Cache.PreviousPositions[player] or currentPos
+	local lastTime = self.Cache.LastUpdateTimes[player] or (currentTime - 0.016)
+	local deltaTime = math.max(currentTime - lastTime, 0.001)
+	
+	local rawVelocity = (currentPos - lastPos) / deltaTime
+	if rawVelocity.Magnitude > Config.Prediction.MaxVelocity then
+		rawVelocity = rawVelocity.Unit * Config.Prediction.MaxVelocity
+	end
+	
+	local alpha = Utils.CalculateSmoothAlpha(deltaTime, tau)
+	local prevSmoothed = self.Cache.SmoothedVelocities[player] or rawVelocity
+	local smoothed = prevSmoothed:Lerp(rawVelocity, alpha)
+	
+	-- Ускорение
+	local prevVelocity = self.Cache.SmoothedVelocities[player] or smoothed
+	local rawAccel = (smoothed - prevVelocity) / deltaTime
+	local prevAccel = self.Cache.Acceleration[player] or rawAccel
+	local accelAlpha = Utils.CalculateSmoothAlpha(deltaTime, tau * 2)
+	local smoothedAccel = prevAccel:Lerp(rawAccel, accelAlpha)
+	
+	self.Cache.Acceleration[player] = smoothedAccel
+	self.Cache.SmoothedVelocities[player] = smoothed
+	self.Cache.PreviousPositions[player] = currentPos
+	self.Cache.LastUpdateTimes[player] = currentTime
+	
+	return smoothed, smoothedAccel
+end
+
+-- Получить цель для рейджбота (с поддержкой 360°)
+function Ragebot:GetTarget()
+	if not self.Enabled then return nil end
+	
+	local myChar, myHum, myRoot = Utils.GetCharacterParts()
+	if not myRoot then return nil end
+	
+	local bestTarget, bestScore = nil, math.huge
+	
+	for _, player in ipairs(Services.Players:GetPlayers()) do
+		if player == LocalPlayer then continue end
+		
+		local char = player.Character
+		if not char then continue end
+		if not Utils.IsCharacterAlive(char) then continue end
+		
+		local hitbox = Utils.GetHitboxPart(char, self.Hitbox)
+		if not hitbox then continue end
+		
+		-- Проверка видимости (FOV всегда игнорируется - 360° режим)
+		if not Utils.IsVisible(Camera.CFrame.Position, hitbox) then continue end
+		
+		-- Выбираем ближайшего по расстоянию в мире
+		local worldDist = Utils.GetWorldDistance(myRoot.Position, hitbox.Position)
+		
+		if worldDist < bestScore then
+			bestScore = worldDist
+			bestTarget = player
+		end
+	end
+	
+	self.Cache.CurrentTarget = bestTarget
+	return bestTarget
+end
+
+-- Получить все цели в радиусе (для Killaura)
+function Ragebot:GetTargetsInRange(range)
+	local targets = {}
+	local myChar, myHum, myRoot = Utils.GetCharacterParts()
+	if not myRoot then return targets end
+	
+	for _, player in ipairs(Services.Players:GetPlayers()) do
+		if player == LocalPlayer then continue end
+		
+		local char = player.Character
+		if not char then continue end
+		if not Utils.IsCharacterAlive(char) then continue end
+		
+		local hitbox = Utils.GetHitboxPart(char, self.Hitbox)
+		if not hitbox then continue end
+		
+		local distance = Utils.GetWorldDistance(myRoot.Position, hitbox.Position)
+		if distance <= range then
+			table.insert(targets, {player = player, distance = distance, hitbox = hitbox, character = char})
+		end
+	end
+	
+	table.sort(targets, function(a, b) return a.distance < b.distance end)
+	return targets
+end
+
+-- Предсказание позиции (с Auto Prediction)
+function Ragebot:PredictPosition(character, hitbox)
+	if not hitbox then return nil end
+	
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return hitbox.Position end
+	
+	local ping = Aimbot:GetPing()
+	local t_net = (ping / 1000) / 2
+	local t_tick = Config.Prediction.ServerTick / 2
+	
+	local velocity, acceleration
+	local t_proj
+	
+	if self.AutoPrediction.Enabled then
+		-- Используем сглаженную скорость и авто-расчёт prediction
+		velocity, acceleration = self:GetSmoothedVelocity(character)
+		local divisor = self.AutoPrediction.Divisor or 250
+		t_proj = Config.Prediction.Base + (ping / divisor) * 0.1
+	else
+		-- Используем обычную скорость и ручной prediction
+		velocity = rootPart.AssemblyLinearVelocity
+		if velocity.Magnitude > Config.Prediction.MaxVelocity then
+			velocity = velocity.Unit * Config.Prediction.MaxVelocity
+		end
+		acceleration = Vector3.zero
+		t_proj = self.Prediction
+	end
+	
+	local t_total = t_net + t_tick + t_proj
+	
+	-- Формула: позиция + скорость*время + 0.5*ускорение*время²
+	return hitbox.Position + (velocity * t_total) + (acceleration * 0.5 * t_total * t_total)
+end
+
+-- Получить оружие
+function Ragebot:GetGun()
+	local char = LocalPlayer.Character
+	if not char then return nil end
+	
+	local tool = char:FindFirstChildWhichIsA("Tool")
+	if not tool then return nil end
+	if not tool:FindFirstChild("Handle") then return nil end
+	if not tool:FindFirstChild("RemoteEvent") then return nil end
+	
+	return tool
+end
+
+-- Проверка мили оружия
+function Ragebot:IsMelee(gun)
+	if not gun then return false end
+	return Config.Weapons.Melee[gun.Name:upper()] == true
+end
+
+-- Проверка возможности стрельбы
+function Ragebot:CanShoot()
+	local char, hum = Utils.GetCharacterParts()
+	if not char or not hum then return false, nil end
+	
+	local gun = self:GetGun()
+	if not gun then return false, nil end
+	
+	if self:IsMelee(gun) then return false, gun end
+	
+	local ammo = gun:FindFirstChild("Ammo")
+	if ammo and ammo.Value <= 0 then return false, gun end
+	
+	local bodyEffects = char:FindFirstChild("BodyEffects")
+	if not bodyEffects then return false, nil end
+	
+	if bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then return false, nil end
+	if bodyEffects:FindFirstChild("Dead") and bodyEffects.Dead.Value then return false, nil end
+	if bodyEffects:FindFirstChild("Reload") and bodyEffects.Reload.Value then return false, gun end
+	
+	return true, gun
+end
+
+-- Выстрел в цель
+function Ragebot:ShootAt(target)
+	local canShoot, gun = self:CanShoot()
+	
+	if not canShoot then
+		if gun then
+			local ammo = gun:FindFirstChild("Ammo")
+			if ammo and ammo.Value <= 0 then
+				MainEvent:FireServer("Reload", gun)
+			end
+		end
+		return false
+	end
+	
+	local targetChar = target.Character
+	if not targetChar then return false end
+	if not Utils.IsCharacterAlive(targetChar) then return false end
+	
+	local hitbox = Utils.GetHitboxPart(targetChar, self.Hitbox)
+	if not hitbox then return false end
+	
+	if not Utils.IsVisible(Camera.CFrame.Position, hitbox) then return false end
+	
+	local handle = gun:FindFirstChild("Handle")
+	if not handle then return false end
+	
+	local predictedPos = self:PredictPosition(targetChar, hitbox)
+	if not predictedPos then 
+		predictedPos = hitbox.Position 
+	end
+	
+	local startPos = Camera.CFrame.Position
+	local normal = (predictedPos - startPos).Unit
+	if normal.Magnitude == 0 then normal = Vector3.new(0, 1, 0) end
+	
+	MainEvent:FireServer("ShootGun", handle, startPos, predictedPos, hitbox, normal)
+	
+	return true
+end
+
+-- =====================================================
+-- AUTOFIRE
+-- =====================================================
+function Ragebot:StartAutofire()
+	if self.Autofire.Connection then return end
+	
+	self.Autofire.Connection = Services.RunService.RenderStepped:Connect(function()
+		if not self.Enabled or not self.Autofire.Enabled then return end
+		
+		local currentTime = tick()
+		local gun = self:GetGun()
+		if not gun then return end
+		if self:IsMelee(gun) then return end
+		
+		local fireRate = Aimbot:GetWeaponFireRate(gun)
+		
+		if self.Rapidfire.Enabled then
+			fireRate = fireRate / self.Rapidfire.Multiplier
+		end
+		
+		fireRate = math.max(fireRate, 0.03)
+		
+		if currentTime - self.Autofire.LastShot < fireRate then return end
+		
+		local target = self:GetTarget()
+		if not target then return end
+		
+		if self:ShootAt(target) then
+			self.Autofire.LastShot = currentTime
+		end
+	end)
+end
+
+function Ragebot:StopAutofire()
+	if self.Autofire.Connection then
+		self.Autofire.Connection:Disconnect()
+		self.Autofire.Connection = nil
+	end
+end
+
+-- =====================================================
+-- AUTOEQUIP
+-- =====================================================
+function Ragebot:GetBestWeapon()
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
+	if not backpack then return nil end
+	
+	for _, weaponName in ipairs(self.Autoequip.Priority) do
+		for _, item in pairs(backpack:GetChildren()) do
+			if item:IsA("Tool") and item.Name:upper() == weaponName then
+				if item:FindFirstChild("Handle") and item:FindFirstChild("RemoteEvent") then
+					return item
+				end
+			end
+		end
+	end
+	
+	for _, item in pairs(backpack:GetChildren()) do
+		if item:IsA("Tool") then
+			if item:FindFirstChild("Handle") and item:FindFirstChild("RemoteEvent") and item:FindFirstChild("Ammo") then
+				if not Config.Weapons.Melee[item.Name:upper()] and not Config.Weapons.NoSilent[item.Name:upper()] then
+					return item
+				end
+			end
+		end
+	end
+	
+	return nil
+end
+
+function Ragebot:StartAutoequip()
+	if self.Autoequip.Connection then return end
+	
+	self.Autoequip.Connection = Services.RunService.Heartbeat:Connect(function()
+		if not self.Enabled or not self.Autoequip.Enabled then return end
+		
+		local char = LocalPlayer.Character
+		if not char then return end
+		
+		local currentTool = char:FindFirstChildWhichIsA("Tool")
+		if currentTool then
+			if currentTool:FindFirstChild("Handle") and currentTool:FindFirstChild("RemoteEvent") and currentTool:FindFirstChild("Ammo") then
+				if not Config.Weapons.Melee[currentTool.Name:upper()] then
+					return
+				end
+			end
+		end
+		
+		local bestWeapon = self:GetBestWeapon()
+		if bestWeapon then
+			local humanoid = char:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				humanoid:EquipTool(bestWeapon)
+			end
+		end
+	end)
+end
+
+function Ragebot:StopAutoequip()
+	if self.Autoequip.Connection then
+		self.Autoequip.Connection:Disconnect()
+		self.Autoequip.Connection = nil
+	end
+end
+
+-- =====================================================
+-- KILLAURA
+-- =====================================================
+function Ragebot:StartKillaura()
+	if self.Killaura.Connection then return end
+	
+	self.Killaura.Connection = Services.RunService.Heartbeat:Connect(function()
+		if not self.Enabled or not self.Killaura.Enabled then return end
+		
+		local currentTime = tick()
+		if currentTime - self.Killaura.LastAttack < self.Killaura.AttackDelay then return end
+		
+		local targets = self:GetTargetsInRange(self.Killaura.Range)
+		if #targets == 0 then return end
+		
+		local char = LocalPlayer.Character
+		if not char then return end
+		local myRoot = char:FindFirstChild("HumanoidRootPart")
+		if not myRoot then return end
+		
+		local gun = self:GetGun()
+		
+		for _, targetData in ipairs(targets) do
+			local target = targetData.player
+			local hitbox = targetData.hitbox
+			local targetChar = targetData.character
+			
+			if gun and not self:IsMelee(gun) then
+				-- Огнестрельное оружие
+				if Utils.IsVisible(Camera.CFrame.Position, hitbox) then
+					self:ShootAt(target)
+					self.Killaura.LastAttack = currentTime
+					break
+				end
+			else
+				-- Мили атака
+				local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+				if targetRoot then
+					-- Поворачиваемся к цели
+					local dir = (targetRoot.Position - myRoot.Position)
+					dir = Vector3.new(dir.X, 0, dir.Z)
+					if dir.Magnitude > 0.1 then
+						myRoot.CFrame = CFrame.lookAt(myRoot.Position, myRoot.Position + dir)
+					end
+					
+					-- Атакуем
+					if gun and gun:FindFirstChild("RemoteEvent") then
+						local handle = gun:FindFirstChild("Handle")
+						if handle then
+							gun.RemoteEvent:FireServer("Hit", hitbox, handle)
+						end
+					else
+						MainEvent:FireServer("Hit", hitbox)
+					end
+					
+					self.Killaura.LastAttack = currentTime
+					break
+				end
+			end
+		end
+	end)
+end
+
+function Ragebot:StopKillaura()
+	if self.Killaura.Connection then
+		self.Killaura.Connection:Disconnect()
+		self.Killaura.Connection = nil
+	end
+end
+
+-- =====================================================
+-- CLEANUP & CONTROL
+-- =====================================================
+function Ragebot:ClearCache()
+	self.Cache.PreviousPositions = {}
+	self.Cache.SmoothedVelocities = {}
+	self.Cache.LastUpdateTimes = {}
+	self.Cache.Acceleration = {}
+end
+
+function Ragebot:CleanupAll()
+	self:StopAutofire()
+	self:StopAutoequip()
+	self:StopKillaura()
+end
+
+function Ragebot:SetEnabled(enabled)
+	self.Enabled = enabled
+	
+	if not enabled then
+		self:CleanupAll()
+		self:ClearCache()
+	else
+		if self.Autofire.Enabled then self:StartAutofire() end
+		if self.Autoequip.Enabled then self:StartAutoequip() end
+		if self.Killaura.Enabled then self:StartKillaura() end
+	end
 end
 
 -- =====================================================
@@ -1876,6 +2405,8 @@ local function OnCharacterAdded(char)
 	Aimbot:StopTrigger()
 	if Aimbot.Silent.Enabled then Aimbot:StopSilent() end
 	Aimbot:ClearCache()
+	Ragebot:CleanupAll()
+	Ragebot:ClearCache()
 	
 	local hum = char:WaitForChild("Humanoid", 10)
 	if not hum then State.IsResetting = false return end
@@ -1902,6 +2433,12 @@ local function OnCharacterAdded(char)
 	
 	if Aimbot.Trigger.Active then Aimbot:StartTrigger() end
 	if Aimbot.Silent.Enabled then Aimbot:StartSilent() end
+	
+	if Ragebot.Enabled then
+		if Ragebot.Autofire.Enabled then Ragebot:StartAutofire() end
+		if Ragebot.Autoequip.Enabled then Ragebot:StartAutoequip() end
+		if Ragebot.Killaura.Enabled then Ragebot:StartKillaura() end
+	end
 	
 	hum.Died:Connect(function()
 		Movement:CleanupAll()
@@ -2018,6 +2555,198 @@ do
 	if triggerToggle.Option then triggerToggle.Option:AddKeybind({ Name = "Keybind", Flag = "TriggerKeybind" }) end
 	TriggerSection:AddSlider({ Name = "Min Delay", Type = "ms", Default = 50, Min = 0, Max = 200, Round = 0, Flag = "TriggerMinDelay",
 		Callback = function(v) Aimbot.Trigger.MinDelay = v / 1000 end })
+end
+
+-- RAGE TAB
+do
+	local GlobalSection = Menus.Rage:AddSection({ Name = "Global", Side = "left", ShowTitle = true, Height = 0 })
+	
+	GlobalSection:AddToggle({ 
+		Name = "Ragebot", 
+		Default = false, 
+		Flag = "RagebotEnabled",
+		Callback = function(v) 
+			Ragebot:SetEnabled(v)
+		end 
+	})
+	
+	GlobalSection:AddDropdown({ 
+		Name = "Hitbox", 
+		Values = {"Head", "UpperTorso", "HumanoidRootPart", "LowerTorso", "Nearest"},
+		Default = "Head", 
+		Flag = "RageHitbox", 
+		Callback = function(v) 
+			Ragebot.Hitbox = v 
+		end 
+	})
+	
+	local PredictionSection = Menus.Rage:AddSection({ Name = "Prediction", Side = "left", ShowTitle = true, Height = 0 })
+	
+	-- Manual Prediction слайдер (виден когда Auto Prediction выключен)
+	local manualPredSlider = PredictionSection:AddSlider({ 
+		Name = "Manual Prediction", 
+		Default = 0.15, 
+		Min = 0, 
+		Max = 0.5, 
+		Round = 2, 
+		Flag = "RagePrediction",
+		Callback = function(v) 
+			Ragebot.Prediction = v 
+		end 
+	})
+	
+	-- Auto Prediction Divisor (виден когда Auto Prediction включен)
+	local autoPredDivisorSlider = PredictionSection:AddSlider({ 
+		Name = "Auto Pred Divisor", 
+		Default = 250, 
+		Min = 150, 
+		Max = 400, 
+		Round = 0, 
+		Flag = "RageAutoPredDivisor",
+		Callback = function(v) 
+			Ragebot.AutoPrediction.Divisor = v 
+		end 
+	})
+	autoPredDivisorSlider:SetVisible(false)
+	
+	-- Smoothing Tau (виден когда Auto Prediction включен)
+	local autoPredTauSlider = PredictionSection:AddSlider({ 
+		Name = "Smoothing Tau", 
+		Type = "s",
+		Default = 0.15, 
+		Min = 0.05, 
+		Max = 0.5, 
+		Round = 2, 
+		Flag = "RageAutoPredTau",
+		Callback = function(v) 
+			Ragebot.AutoPrediction.Tau = v 
+		end 
+	})
+	autoPredTauSlider:SetVisible(false)
+	
+	-- Auto Prediction Toggle
+	PredictionSection:AddToggle({ 
+		Name = "Auto Prediction", 
+		Default = false, 
+		Flag = "RageAutoPrediction",
+		Callback = function(v) 
+			Ragebot.AutoPrediction.Enabled = v
+			manualPredSlider:SetVisible(not v)
+			autoPredDivisorSlider:SetVisible(v)
+			autoPredTauSlider:SetVisible(v)
+		end 
+	})
+	
+	local FunctionsSection = Menus.Rage:AddSection({ Name = "Functions", Side = "right", ShowTitle = true, Height = 0 })
+	
+	local autofireToggle = FunctionsSection:AddToggle({ 
+		Name = "Autofire", 
+		Default = false, 
+		Option = true,
+		Flag = "AutofireEnabled",
+		Callback = function(v) 
+			Ragebot.Autofire.Enabled = v
+			if v and Ragebot.Enabled then 
+				Ragebot:StartAutofire() 
+			else 
+				Ragebot:StopAutofire() 
+			end
+		end 
+	})
+	if autofireToggle.Option then 
+		autofireToggle.Option:AddKeybind({ Name = "Keybind", Flag = "AutofireKeybind" }) 
+	end
+	
+	local autoequipToggle = FunctionsSection:AddToggle({ 
+		Name = "Autoequip", 
+		Default = false, 
+		Option = true,
+		Flag = "AutoequipEnabled",
+		Callback = function(v) 
+			Ragebot.Autoequip.Enabled = v
+			if v and Ragebot.Enabled then 
+				Ragebot:StartAutoequip() 
+			else 
+				Ragebot:StopAutoequip() 
+			end
+		end 
+	})
+	if autoequipToggle.Option then 
+		autoequipToggle.Option:AddKeybind({ Name = "Keybind", Flag = "AutoequipKeybind" }) 
+	end
+	
+	local rapidfireSlider = FunctionsSection:AddSlider({ 
+		Name = "Rapidfire Speed", 
+		Default = 2, 
+		Min = 1.5, 
+		Max = 5, 
+		Round = 1, 
+		Flag = "RapidfireMultiplier",
+		Callback = function(v) 
+			Ragebot.Rapidfire.Multiplier = v 
+		end 
+	})
+	rapidfireSlider:SetVisible(false)
+	
+	local rapidfireToggle = FunctionsSection:AddToggle({ 
+		Name = "Rapidfire", 
+		Default = false, 
+		Flag = "RapidfireEnabled",
+		Callback = function(v) 
+			Ragebot.Rapidfire.Enabled = v
+			rapidfireSlider:SetVisible(v)
+		end 
+	})
+	
+	local KillauraSection = Menus.Rage:AddSection({ Name = "Killaura", Side = "right", ShowTitle = true, Height = 0 })
+	
+	local killauraRangeSlider = KillauraSection:AddSlider({ 
+		Name = "Range", 
+		Type = "studs",
+		Default = 15, 
+		Min = 5, 
+		Max = 50, 
+		Round = 0, 
+		Flag = "KillauraRange",
+		Callback = function(v) 
+			Ragebot.Killaura.Range = v 
+		end 
+	})
+	killauraRangeSlider:SetVisible(false)
+	
+	local killauraDelaySlider = KillauraSection:AddSlider({ 
+		Name = "Attack Delay", 
+		Type = "ms",
+		Default = 100, 
+		Min = 30, 
+		Max = 500, 
+		Round = 0, 
+		Flag = "KillauraDelay",
+		Callback = function(v) 
+			Ragebot.Killaura.AttackDelay = v / 1000 
+		end 
+	})
+	killauraDelaySlider:SetVisible(false)
+	
+	local killauraToggle = KillauraSection:AddToggle({ 
+		Name = "Enabled", 
+		Default = false, 
+		Option = true,
+		Flag = "KillauraEnabled",
+		Callback = function(v) 
+			Ragebot.Killaura.Enabled = v
+			killauraRangeSlider:SetVisible(v)
+			killauraDelaySlider:SetVisible(v)
+			if v and Ragebot.Enabled then 
+				Ragebot:StartKillaura() 
+			else 
+				Ragebot:StopKillaura() 
+			end
+		end 
+	})
+	if killauraToggle.Option then 
+		killauraToggle.Option:AddKeybind({ Name = "Keybind", Flag = "KillauraKeybind" }) 
+	end
 end
 
 -- VISUALS TAB
